@@ -139,6 +139,10 @@ new class extends Component
 <div x-data="{ toast: '', showToast: false }"
      x-on:notify.window="toast = $event.detail.message; showToast = true; setTimeout(() => showToast = false, 2600)"
      class="min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
+    @php
+        $currentUser = auth()->user();
+    @endphp
+
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:min-h-screen">
         <div class="flex items-center gap-3">
             <div class="grid h-11 w-11 place-items-center rounded-lg bg-teal-100 font-bold text-teal-800">ES</div>
@@ -184,8 +188,8 @@ new class extends Component
         <div class="mt-10 hidden border-t border-white/10 pt-5 lg:flex lg:items-center lg:gap-3">
             <div class="grid h-10 w-10 place-items-center rounded-lg bg-slate-700 font-semibold">AN</div>
             <div>
-                <div class="text-sm font-semibold">Admin Sekretariat MRP</div>
-                <div class="text-xs text-slate-400">Papua Tengah</div>
+                <div class="text-sm font-semibold">{{ $currentUser->name }}</div>
+                <div class="text-xs text-slate-400">{{ $currentUser->role }}</div>
             </div>
         </div>
     </aside>
@@ -197,9 +201,17 @@ new class extends Component
                 <h1 class="mt-1 text-3xl font-bold tracking-normal text-slate-950">Setting E-Surat MRP</h1>
                 <p class="mt-2 max-w-2xl text-sm text-slate-600">Atur identitas Sekretariat MRP, format nomor surat, batas dokumen, notifikasi, dan peran pengguna MRP Provinsi Papua Tengah.</p>
             </div>
-            <a href="{{ route('dashboard') }}" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
-                Kembali ke Dasbor
-            </a>
+            <div class="flex flex-col gap-2 sm:flex-row">
+                <a href="{{ route('dashboard') }}" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
+                    Kembali ke Dasbor
+                </a>
+                <form method="POST" action="{{ route('logout') }}">
+                    @csrf
+                    <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
+                        Logout
+                    </button>
+                </form>
+            </div>
         </header>
 
         <section class="mt-6 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">

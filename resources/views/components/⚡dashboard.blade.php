@@ -89,6 +89,8 @@ new class extends Component
 
     public function openLetterForm(string $type = 'Masuk', ?string $unitCode = null): void
     {
+        abort_unless($this->canManageLetters(), 403);
+
         $this->resetValidation();
         $this->type = $type;
         $this->unitCode = $unitCode && in_array($unitCode, ['SET-MRP', 'MRP'], true) ? $unitCode : 'SET-MRP';
@@ -116,6 +118,8 @@ new class extends Component
 
     public function saveLetter(): void
     {
+        abort_unless($this->canManageLetters(), 403);
+
         $validated = $this->validate([
             'type' => ['required', 'in:Masuk,Keluar'],
             'unitCode' => ['required', 'in:SET-MRP,MRP'],
@@ -147,6 +151,8 @@ new class extends Component
 
     public function openDispositionForm(int $letterId): void
     {
+        abort_unless($this->canDispose(), 403);
+
         $this->resetValidation();
         $this->selectedLetterId = $letterId;
         $this->recipientName = 'Staf Administrasi';
@@ -156,6 +162,8 @@ new class extends Component
 
     public function saveDisposition(): void
     {
+        abort_unless($this->canDispose(), 403);
+
         $validated = $this->validate([
             'recipientName' => ['required', 'string', 'max:255'],
             'instruction' => ['required', 'string', 'max:1000'],
@@ -180,6 +188,8 @@ new class extends Component
 
     public function updateStatus(int $letterId, string $status): void
     {
+        abort_unless($this->canUpdateStatus(), 403);
+
         Letter::whereKey($letterId)->update(['status' => $status]);
         $this->dispatch('notify', message: 'Status surat diperbarui.');
     }
@@ -187,6 +197,30 @@ new class extends Component
     public function markDone(int $letterId): void
     {
         $this->updateStatus($letterId, 'Selesai');
+    }
+
+    public function canManageLetters(): bool
+    {
+        return auth()->user()?->isAdmin() ?? false;
+    }
+
+    public function canDispose(): bool
+    {
+        $user = auth()->user();
+
+        return $user?->isAdmin() || $user?->isLeader();
+    }
+
+    public function canUpdateStatus(): bool
+    {
+        $user = auth()->user();
+
+        return $user?->isAdmin() || $user?->isStaff();
+    }
+
+    public function canManageSettings(): bool
+    {
+        return auth()->user()?->isAdmin() ?? false;
     }
 
     public function nextLetterNumber(?string $unitCode = null): string
@@ -230,6 +264,7 @@ new class extends Component
     @php
         $letters = $this->letters();
         $selectedLetter = $this->selectedLetter();
+        $currentUser = auth()->user();
         $setIncomingCount = App\Models\Letter::where('unit_code', 'SET-MRP')->where('type', 'Masuk')->count();
         $setOutgoingCount = App\Models\Letter::where('unit_code', 'SET-MRP')->where('type', 'Keluar')->count();
         $mrpIncomingCount = App\Models\Letter::where('unit_code', 'MRP')->where('type', 'Masuk')->count();
@@ -290,20 +325,22 @@ new class extends Component
 
             <button type="button"
                     wire:click="openDispositionForm({{ $selectedLetterId ?? 0 }})"
-                    @disabled(! $selectedLetterId)
+                    @disabled(! $selectedLetterId || ! $this->canDispose())
                     class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50">
                 Disposisi
             </button>
-            <a href="{{ route('settings') }}" class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
-                Setting
-            </a>
+            @if ($this->canManageSettings())
+                <a href="{{ route('settings') }}" class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    Setting
+                </a>
+            @endif
         </nav>
 
         <div class="mt-10 hidden border-t border-white/10 pt-5 lg:flex lg:items-center lg:gap-3">
             <div class="grid h-10 w-10 place-items-center rounded-lg bg-slate-700 font-semibold">AN</div>
             <div>
-                <div class="text-sm font-semibold">Admin Sekretariat MRP</div>
-                <div class="text-xs text-slate-400">Papua Tengah</div>
+                <div class="text-sm font-semibold">{{ $currentUser->name }}</div>
+                <div class="text-xs text-slate-400">{{ $currentUser->role }}</div>
             </div>
         </div>
     </aside>
@@ -323,16 +360,24 @@ new class extends Component
                            class="w-full border-0 bg-transparent text-sm outline-none"
                            placeholder="Cari nomor, perihal, pihak luar...">
                 </label>
-                <button type="button"
-                        wire:click="openLetterForm('Keluar', '{{ $unitFilter === 'Semua' ? 'SET-MRP' : $unitFilter }}')"
-                        class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
-                    # Generate
-                </button>
-                <button type="button"
-                        wire:click="openLetterForm"
-                        class="inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-teal-800">
-                    + Catat Surat
-                </button>
+                @if ($this->canManageLetters())
+                    <button type="button"
+                            wire:click="openLetterForm('Keluar', '{{ $unitFilter === 'Semua' ? 'SET-MRP' : $unitFilter }}')"
+                            class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
+                        # Generate
+                    </button>
+                    <button type="button"
+                            wire:click="openLetterForm"
+                            class="inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-teal-800">
+                        + Catat Surat
+                    </button>
+                @endif
+                <form method="POST" action="{{ route('logout') }}">
+                    @csrf
+                    <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
+                        Logout
+                    </button>
+                </form>
             </div>
         </header>
 
@@ -424,7 +469,9 @@ new class extends Component
                                     <td class="border-b border-slate-100 px-5 py-4">
                                         <div class="flex gap-2">
                                             <button type="button" wire:click="selectLetter({{ $letter->id }})" class="rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Detail</button>
-                                            <button type="button" wire:click="openDispositionForm({{ $letter->id }})" class="rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Disposisi</button>
+                                            @if ($this->canDispose())
+                                                <button type="button" wire:click="openDispositionForm({{ $letter->id }})" class="rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Disposisi</button>
+                                            @endif
                                         </div>
                                     </td>
                                 </tr>
@@ -489,14 +536,16 @@ new class extends Component
                             </div>
                         </div>
 
-                        <div class="flex flex-col gap-2 sm:flex-row">
-                            <select wire:change="updateStatus({{ $selectedLetter->id }}, $event.target.value)" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
-                                @foreach (['Baru', 'Disposisi', 'Diproses', 'Selesai'] as $status)
-                                    <option value="{{ $status }}" @selected($selectedLetter->status === $status)>{{ $status }}</option>
-                                @endforeach
-                            </select>
-                            <button type="button" wire:click="markDone({{ $selectedLetter->id }})" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold hover:border-teal-600">Tandai Selesai</button>
-                        </div>
+                        @if ($this->canUpdateStatus())
+                            <div class="flex flex-col gap-2 sm:flex-row">
+                                <select wire:change="updateStatus({{ $selectedLetter->id }}, $event.target.value)" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
+                                    @foreach (['Baru', 'Disposisi', 'Diproses', 'Selesai'] as $status)
+                                        <option value="{{ $status }}" @selected($selectedLetter->status === $status)>{{ $status }}</option>
+                                    @endforeach
+                                </select>
+                                <button type="button" wire:click="markDone({{ $selectedLetter->id }})" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold hover:border-teal-600">Tandai Selesai</button>
+                            </div>
+                        @endif
                     </div>
                 @else
                     <div class="grid min-h-80 place-items-center p-8 text-center text-slate-500">
