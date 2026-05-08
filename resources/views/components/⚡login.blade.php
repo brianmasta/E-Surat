@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\AppSetting;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 use Livewire\Component;
@@ -7,7 +8,9 @@ use Livewire\Component;
 new class extends Component
 {
     public string $email = 'admin@mrp-papuatengah.test';
+
     public string $password = 'password';
+
     public bool $remember = false;
 
     public function login()
@@ -23,6 +26,14 @@ new class extends Component
             ]);
         }
 
+        if (! Auth::user()->is_active) {
+            Auth::logout();
+
+            throw ValidationException::withMessages([
+                'email' => 'Akun ini sedang nonaktif. Hubungi Admin Sekretariat.',
+            ]);
+        }
+
         session()->regenerate();
 
         return redirect()->intended(route('dashboard'));
@@ -30,13 +41,15 @@ new class extends Component
 };
 ?>
 
+@php($agencyProfile = AppSetting::agency())
+
 <main class="grid min-h-screen place-items-center px-4 py-8">
     <section class="w-full max-w-5xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:grid lg:grid-cols-[1fr_420px]">
         <div class="bg-slate-900 p-8 text-white lg:p-10">
-            <div class="grid h-12 w-12 place-items-center rounded-lg bg-teal-100 font-bold text-teal-800">ES</div>
-            <h1 class="mt-8 text-3xl font-bold tracking-normal">E-Surat MRP Papua Tengah</h1>
+            <div class="grid h-12 w-12 place-items-center rounded-lg bg-teal-100 font-bold text-teal-800">{{ $agencyProfile['short_name'] }}</div>
+            <h1 class="mt-8 text-3xl font-bold tracking-normal">{{ $agencyProfile['app_name'] }}</h1>
             <p class="mt-3 max-w-xl text-sm leading-6 text-slate-300">
-                Sistem persuratan untuk Sekretariat MRP dan MRP Provinsi Papua Tengah, dengan akses berbeda untuk Admin, Pimpinan, dan Staf.
+                Sistem persuratan untuk {{ $agencyProfile['name'] }}, dengan akses berbeda untuk Admin, Pimpinan, Kepala Bagian, dan Staf.
             </p>
 
             <div class="mt-8 grid gap-3 text-sm">
@@ -45,8 +58,12 @@ new class extends Component
                     <div class="text-slate-300">Catat surat, kelola setting, disposisi, dan status.</div>
                 </div>
                 <div class="rounded-lg bg-white/10 p-4">
-                    <div class="font-bold">Pimpinan MRP</div>
+                    <div class="font-bold">Pimpinan</div>
                     <div class="text-slate-300">Melihat surat dan memberi disposisi elektronik.</div>
+                </div>
+                <div class="rounded-lg bg-white/10 p-4">
+                    <div class="font-bold">Kepala Bagian</div>
+                    <div class="text-slate-300">Menerima disposisi dan memperbarui tindak lanjut.</div>
                 </div>
                 <div class="rounded-lg bg-white/10 p-4">
                     <div class="font-bold">Staf Sekretariat</div>
@@ -86,6 +103,7 @@ new class extends Component
                 <div class="mt-2 grid gap-1">
                     <div>Admin: admin@mrp-papuatengah.test</div>
                     <div>Pimpinan: pimpinan@mrp-papuatengah.test</div>
+                    <div>Kepala Bagian: kepala.bagian@mrp-papuatengah.test</div>
                     <div>Staf: staf@mrp-papuatengah.test</div>
                     <div>Password semua akun: password</div>
                 </div>

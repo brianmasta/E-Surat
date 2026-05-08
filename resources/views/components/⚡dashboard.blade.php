@@ -1,38 +1,105 @@
 <?php
 
+use App\Models\AppSetting;
+use App\Models\ActivityLog;
+use App\Models\ArchiveClassification;
+use App\Models\DispositionRecipient;
 use App\Models\Letter;
+use App\Models\LetterApproval;
+use App\Support\TaskInbox;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 use Livewire\Component;
 use Livewire\WithFileUploads;
+use Livewire\WithPagination;
 
 new class extends Component
 {
     use WithFileUploads;
+    use WithPagination;
 
     public string $search = '';
+
     public string $typeFilter = 'Semua';
+
     public string $unitFilter = 'Semua';
+
+    public string $statusFilter = 'Semua';
+
+    public string $urgencyFilter = 'Semua';
+
+    public string $dueFilter = 'Semua';
+
+    public string $dateFrom = '';
+
+    public string $dateTo = '';
+
+    public int $perPage = 10;
+
     public ?int $selectedLetterId = null;
+
+    public ?int $editingLetterId = null;
+
+    public bool $showDetailModal = false;
+
     public bool $showLetterForm = false;
+
     public bool $showDispositionForm = false;
 
     public string $type = 'Masuk';
+
     public string $unitCode = 'SET-MRP';
+
+    public string $classificationCode = '';
+
+    public string $agendaNumber = '';
+
     public string $number = '';
+
     public string $subject = '';
+
+    public string $outgoingInputMode = 'template';
+
+    public string $outgoingBody = '';
+
+    public string $signerName = '';
+
+    public string $signerTitle = '';
+
     public string $externalParty = '';
+
     public string $letterDate = '';
+
+    public string $receivedDate = '';
+
+    public string $nature = 'Biasa';
+
+    public string $urgency = 'Normal';
+
+    public string $dueDate = '';
+
     public $document = null;
 
-    public string $recipientName = 'Staf Administrasi';
+    public $outgoingDocument = null;
+
+    public array $attachmentFiles = [];
+
+    public array $memoFiles = [];
+
+    public array $supportingFiles = [];
+
+    public ?int $recipientId = null;
+
     public string $instruction = '';
 
     public function mount(): void
     {
+        $unitCodes = $this->unitCodes();
         $this->letterDate = now()->toDateString();
         $this->typeFilter = in_array(request('filter'), ['Semua', 'Masuk', 'Keluar'], true)
             ? request('filter')
             : 'Semua';
-        $this->unitFilter = in_array(request('unit'), ['Semua', 'SET-MRP', 'MRP'], true)
+        $this->unitFilter = in_array(request('unit'), ['Semua', ...$unitCodes], true)
             ? request('unit')
             : 'Semua';
         $this->selectedLetterId = Letter::latest('letter_date')->value('id');
@@ -41,45 +108,118 @@ new class extends Component
     public function letters()
     {
         return Letter::query()
-            ->with('dispositions')
-            ->when($this->typeFilter !== 'Semua', fn ($query) => $query->where('type', $this->typeFilter))
-            ->when($this->unitFilter !== 'Semua', fn ($query) => $query->where('unit_code', $this->unitFilter))
-            ->when($this->search !== '', function ($query) {
-                $search = '%'.$this->search.'%';
-
-                $query->where(function ($query) use ($search) {
-                    $query
-                        ->where('number', 'like', $search)
-                        ->orWhere('unit_code', 'like', $search)
-                        ->orWhere('subject', 'like', $search)
-                        ->orWhere('external_party', 'like', $search)
-                        ->orWhere('status', 'like', $search);
-                });
-            })
+            ->with('classification', 'dispositions')
+            ->applyDashboardFilters($this->dashboardFilters())
             ->latest('letter_date')
             ->latest()
-            ->get();
+            ->paginate($this->perPage);
+    }
+
+    public function dashboardFilters(): array
+    {
+        return [
+            'search' => $this->search,
+            'type' => $this->typeFilter,
+            'unit' => $this->unitFilter,
+            'status' => $this->statusFilter,
+            'urgency' => $this->urgencyFilter,
+            'due' => $this->dueFilter,
+            'date_from' => $this->dateFrom,
+            'date_to' => $this->dateTo,
+        ];
+    }
+
+    public function exportUrl(): string
+    {
+        return route('letters.export', array_filter($this->dashboardFilters(), fn ($value) => $value !== '' && $value !== 'Semua'));
+    }
+
+    public function updated(string $property, mixed $value = null): void
+    {
+        if (in_array($property, ['search', 'statusFilter', 'urgencyFilter', 'dueFilter', 'dateFrom', 'dateTo'], true)) {
+            $this->resetPage();
+        }
     }
 
     public function selectedLetter(): ?Letter
     {
-        return Letter::with('dispositions')->find($this->selectedLetterId);
+        return Letter::with('classification', 'attachments', 'approvals', 'dispositions.children')->find($this->selectedLetterId);
+    }
+
+    public function archiveClassifications()
+    {
+        return ArchiveClassification::query()
+            ->orderBy('code')
+            ->get(['code', 'name']);
+    }
+
+    public function dispositionRecipients()
+    {
+        return DispositionRecipient::query()
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->get();
+    }
+
+    public function units(): array
+    {
+        return AppSetting::letterUnits();
+    }
+
+    public function unitCodes(): array
+    {
+        return AppSetting::letterUnitCodes();
+    }
+
+    public function defaultUnitCode(): string
+    {
+        return AppSetting::defaultLetterUnitCode();
+    }
+
+    public function normalizeUnitCode(?string $unitCode = null): string
+    {
+        return in_array($unitCode, $this->unitCodes(), true) ? $unitCode : $this->defaultUnitCode();
+    }
+
+    public function unitSummaries(): array
+    {
+        return collect($this->units())
+            ->map(fn (array $unit) => [
+                ...$unit,
+                'incoming_count' => Letter::where('unit_code', $unit['code'])->where('type', 'Masuk')->count(),
+                'outgoing_count' => Letter::where('unit_code', $unit['code'])->where('type', 'Keluar')->count(),
+            ])
+            ->values()
+            ->all();
     }
 
     public function setFilter(string $filter): void
     {
         $this->typeFilter = $filter;
+        $this->resetPage();
     }
 
     public function setUnitFilter(string $filter): void
     {
         $this->unitFilter = $filter;
+        $this->resetPage();
+    }
+
+    public function resetAdvancedFilters(): void
+    {
+        $this->statusFilter = 'Semua';
+        $this->urgencyFilter = 'Semua';
+        $this->dueFilter = 'Semua';
+        $this->dateFrom = '';
+        $this->dateTo = '';
+        $this->resetPage();
     }
 
     public function setCombinedFilter(string $typeFilter, string $unitFilter): void
     {
         $this->typeFilter = $typeFilter;
         $this->unitFilter = $unitFilter;
+        $this->resetPage();
     }
 
     public function selectLetter(int $letterId): void
@@ -87,32 +227,112 @@ new class extends Component
         $this->selectedLetterId = $letterId;
     }
 
+    public function openDetailModal(int $letterId): void
+    {
+        $this->selectedLetterId = $letterId;
+        $this->outgoingDocument = null;
+        $this->showDetailModal = true;
+    }
+
     public function openLetterForm(string $type = 'Masuk', ?string $unitCode = null): void
     {
         abort_unless($this->canManageLetters(), 403);
 
         $this->resetValidation();
+        $this->editingLetterId = null;
         $this->type = $type;
-        $this->unitCode = $unitCode && in_array($unitCode, ['SET-MRP', 'MRP'], true) ? $unitCode : 'SET-MRP';
-        $this->number = $type === 'Keluar' ? $this->nextLetterNumber($this->unitCode) : '';
+        $this->unitCode = $this->normalizeUnitCode($unitCode);
+        $this->classificationCode = '';
+        $this->agendaNumber = $type === 'Masuk' ? $this->nextAgendaNumber($this->unitCode) : '';
+        $this->number = $type === 'Keluar' ? $this->nextLetterNumber($this->unitCode, $this->classificationCode) : '';
         $this->subject = '';
+        $this->outgoingInputMode = 'template';
+        $this->outgoingBody = $type === 'Keluar' ? $this->defaultOutgoingBody() : '';
+        $this->signerName = '';
+        $this->signerTitle = AppSetting::agency()['leader_title'];
         $this->externalParty = '';
         $this->letterDate = now()->toDateString();
+        $this->receivedDate = now()->toDateString();
+        $this->nature = 'Biasa';
+        $this->urgency = 'Normal';
+        $this->dueDate = '';
         $this->document = null;
+        $this->attachmentFiles = [];
+        $this->memoFiles = [];
+        $this->supportingFiles = [];
+        $this->showLetterForm = true;
+    }
+
+    public function openEditLetterForm(int $letterId): void
+    {
+        abort_unless($this->canEditLetters(), 403);
+
+        $letter = Letter::findOrFail($letterId);
+
+        $this->resetValidation();
+        $this->editingLetterId = $letter->id;
+        $this->type = $letter->type;
+        $this->unitCode = $letter->unit_code;
+        $this->classificationCode = $letter->classification_code ?? '';
+        $this->agendaNumber = $letter->agenda_number ?? '';
+        $this->number = $letter->number;
+        $this->subject = $letter->subject;
+        $this->outgoingInputMode = $letter->outgoing_input_mode ?: 'template';
+        $this->outgoingBody = $letter->outgoing_body ?? ($letter->type === 'Keluar' ? $this->defaultOutgoingBody() : '');
+        $this->signerName = $letter->signer_name ?? '';
+        $this->signerTitle = $letter->signer_title ?? AppSetting::agency()['leader_title'];
+        $this->externalParty = $letter->external_party;
+        $this->letterDate = $letter->letter_date?->toDateString() ?? now()->toDateString();
+        $this->receivedDate = $letter->received_date?->toDateString() ?? now()->toDateString();
+        $this->nature = $letter->nature;
+        $this->urgency = $letter->urgency;
+        $this->dueDate = $letter->due_date?->toDateString() ?? '';
+        $this->document = null;
+        $this->attachmentFiles = [];
+        $this->memoFiles = [];
+        $this->supportingFiles = [];
+        $this->showDetailModal = false;
         $this->showLetterForm = true;
     }
 
     public function updatedType(string $value): void
     {
         if ($value === 'Keluar' && $this->number === '') {
-            $this->number = $this->nextLetterNumber($this->unitCode);
+            $this->number = $this->nextLetterNumber($this->unitCode, $this->classificationCode);
+        }
+
+        if ($value === 'Keluar' && $this->outgoingBody === '') {
+            $this->outgoingInputMode = 'template';
+            $this->outgoingBody = $this->defaultOutgoingBody();
+        }
+
+        if ($value === 'Masuk' && $this->agendaNumber === '') {
+            $this->agendaNumber = $this->nextAgendaNumber($this->unitCode);
+        }
+    }
+
+    public function updatedOutgoingInputMode(string $value): void
+    {
+        if ($value === 'template' && $this->outgoingBody === '') {
+            $this->outgoingBody = $this->defaultOutgoingBody();
         }
     }
 
     public function updatedUnitCode(string $value): void
     {
         if ($this->type === 'Keluar') {
-            $this->number = $this->nextLetterNumber($value);
+            $this->number = $this->nextLetterNumber($value, $this->classificationCode);
+        }
+
+        if ($this->type === 'Masuk') {
+            $this->agendaNumber = $this->nextAgendaNumber($value);
+        }
+    }
+
+    public function updatedClassificationCode(string $value): void
+    {
+        if ($this->type === 'Keluar') {
+            $this->number = $this->nextLetterNumber($this->unitCode, $value);
         }
     }
 
@@ -120,33 +340,294 @@ new class extends Component
     {
         abort_unless($this->canManageLetters(), 403);
 
+        $editingLetter = $this->editingLetterId ? Letter::findOrFail($this->editingLetterId) : null;
+
         $validated = $this->validate([
             'type' => ['required', 'in:Masuk,Keluar'],
-            'unitCode' => ['required', 'in:SET-MRP,MRP'],
-            'number' => ['nullable', 'string', 'max:100'],
+            'unitCode' => ['required', Rule::in($this->unitCodes())],
+            'classificationCode' => ['nullable', 'exists:archive_classifications,code'],
+            'agendaNumber' => ['nullable', 'required_if:type,Masuk', 'string', 'max:100', Rule::unique('letters', 'agenda_number')->ignore($this->editingLetterId)],
+            'number' => ['nullable', 'string', 'max:100', Rule::unique('letters', 'number')->ignore($this->editingLetterId)],
             'subject' => ['required', 'string', 'max:255'],
+            'outgoingInputMode' => ['required', 'in:template,upload'],
+            'outgoingBody' => ['nullable', Rule::requiredIf($this->type === 'Keluar' && $this->outgoingInputMode === 'template'), 'string', 'max:5000'],
+            'signerName' => ['nullable', 'string', 'max:255'],
+            'signerTitle' => ['nullable', 'string', 'max:255'],
             'externalParty' => ['required', 'string', 'max:255'],
             'letterDate' => ['required', 'date'],
-            'document' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
+            'receivedDate' => ['nullable', 'required_if:type,Masuk', 'date'],
+            'nature' => ['required', 'in:Biasa,Penting,Rahasia,Sangat Rahasia'],
+            'urgency' => ['required', 'in:Normal,Segera,Sangat Segera'],
+            'dueDate' => ['nullable', 'date', 'after_or_equal:receivedDate'],
+            'document' => ['nullable', Rule::requiredIf($this->type === 'Keluar' && $this->outgoingInputMode === 'upload' && ! $editingLetter?->file_path), 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
+            'attachmentFiles.*' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
+            'memoFiles.*' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
+            'supportingFiles.*' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
         ]);
 
-        $number = $validated['number'] ?: ($validated['type'] === 'Keluar' ? $this->nextLetterNumber($validated['unitCode']) : 'SM/'.$validated['unitCode'].'/'.now()->format('YmdHis'));
-        $filePath = $this->document ? $this->document->store('dokumen-surat', 'public') : null;
+        $number = $validated['number'] ?: ($validated['type'] === 'Keluar' ? $this->nextLetterNumber($validated['unitCode'], $validated['classificationCode'] ?? null) : 'SM/'.$validated['unitCode'].'/'.now()->format('YmdHis'));
+        $filePath = $editingLetter?->file_path;
 
-        $letter = Letter::create([
+        if ($this->document) {
+            if ($editingLetter?->file_path && Storage::disk('public')->exists($editingLetter->file_path)) {
+                Storage::disk('public')->delete($editingLetter->file_path);
+            }
+
+            $filePath = $this->document->store('dokumen-surat', 'public');
+        }
+
+        $data = [
             'type' => $validated['type'],
+            'outgoing_input_mode' => $validated['type'] === 'Keluar' ? $validated['outgoingInputMode'] : null,
             'unit_code' => $validated['unitCode'],
+            'classification_code' => $validated['classificationCode'] ?: null,
+            'agenda_number' => $validated['type'] === 'Masuk' ? $validated['agendaNumber'] : null,
             'number' => $number,
             'subject' => $validated['subject'],
+            'outgoing_body' => $validated['type'] === 'Keluar' && $validated['outgoingInputMode'] === 'template' ? $validated['outgoingBody'] : null,
+            'signer_name' => $validated['type'] === 'Keluar' && $validated['outgoingInputMode'] === 'template' ? ($validated['signerName'] ?: null) : null,
+            'signer_title' => $validated['type'] === 'Keluar' && $validated['outgoingInputMode'] === 'template' ? ($validated['signerTitle'] ?: null) : null,
             'external_party' => $validated['externalParty'],
             'letter_date' => $validated['letterDate'],
+            'received_date' => $validated['type'] === 'Masuk' ? $validated['receivedDate'] : null,
+            'nature' => $validated['nature'],
+            'urgency' => $validated['urgency'],
+            'due_date' => $validated['dueDate'] ?: null,
             'file_path' => $filePath,
-            'status' => $validated['type'] === 'Masuk' ? 'Baru' : 'Selesai',
-        ]);
+            'status' => $editingLetter?->status ?? ($validated['type'] === 'Masuk' ? 'Baru' : 'Selesai'),
+        ];
+
+        if ($editingLetter) {
+            $oldNumber = $editingLetter->number;
+            $editingLetter->update($data);
+            $letter = $editingLetter->refresh();
+        } else {
+            $oldNumber = null;
+            $letter = Letter::create($data);
+        }
+
+        if ($validated['type'] === 'Keluar' && (! $editingLetter || $oldNumber !== $number)) {
+            $this->advanceNextLetterSequence($number);
+        }
+
+        $this->storeAttachmentFiles($letter, 'Lampiran', $this->attachmentFiles);
+        $this->storeAttachmentFiles($letter, 'Nota Dinas', $this->memoFiles);
+        $this->storeAttachmentFiles($letter, 'Dokumen Pendukung', $this->supportingFiles);
 
         $this->selectedLetterId = $letter->id;
         $this->showLetterForm = false;
-        $this->dispatch('notify', message: 'Surat baru berhasil dicatat.');
+        ActivityLog::record(
+            $editingLetter ? 'letter.updated' : 'letter.created',
+            'Surat '.$letter->type.($editingLetter ? ' diperbarui: ' : ' dicatat: ').$letter->number,
+            $letter,
+            ['agenda_number' => $letter->agenda_number, 'urgency' => $letter->urgency],
+        );
+        $this->editingLetterId = null;
+        $this->dispatch('notify', message: $editingLetter ? 'Surat berhasil diperbarui.' : 'Surat baru berhasil dicatat.');
+    }
+
+    public function deleteLetter(int $letterId): void
+    {
+        abort_unless($this->canDeleteLetters(), 403);
+
+        $letter = Letter::with('attachments')->findOrFail($letterId);
+        $number = $letter->number;
+
+        if ($letter->file_path && Storage::disk('public')->exists($letter->file_path)) {
+            Storage::disk('public')->delete($letter->file_path);
+        }
+
+        foreach ($letter->attachments as $attachment) {
+            if (Storage::disk('public')->exists($attachment->file_path)) {
+                Storage::disk('public')->delete($attachment->file_path);
+            }
+        }
+
+        $letter->delete();
+
+        if ($this->selectedLetterId === $letterId) {
+            $this->selectedLetterId = Letter::latest('letter_date')->value('id');
+            $this->showDetailModal = false;
+        }
+
+        ActivityLog::record('letter.deleted', 'Surat dihapus: '.$number);
+        $this->dispatch('notify', message: 'Surat berhasil dihapus.');
+    }
+
+    public function uploadOutgoingDocument(int $letterId): void
+    {
+        abort_unless($this->canManageLetters(), 403);
+
+        $letter = Letter::findOrFail($letterId);
+        abort_unless($letter->type === 'Keluar', 403);
+
+        $this->validate([
+            'outgoingDocument' => ['required', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
+        ]);
+
+        if ($letter->file_path && Storage::disk('public')->exists($letter->file_path)) {
+            Storage::disk('public')->delete($letter->file_path);
+        }
+
+        $letter->update([
+            'file_path' => $this->outgoingDocument->store('dokumen-surat', 'public'),
+        ]);
+
+        $this->outgoingDocument = null;
+        ActivityLog::record('letter.document_uploaded', 'Dokumen surat keluar diunggah: '.$letter->number, $letter);
+        $this->dispatch('notify', message: 'Dokumen surat keluar berhasil diunggah.');
+    }
+
+    public function uploadAdditionalDocuments(int $letterId): void
+    {
+        abort_unless($this->canManageLetters(), 403);
+
+        $letter = Letter::findOrFail($letterId);
+
+        $this->validate([
+            'attachmentFiles.*' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
+            'memoFiles.*' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
+            'supportingFiles.*' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
+        ]);
+
+        $total = 0;
+        $total += $this->storeAttachmentFiles($letter, 'Lampiran', $this->attachmentFiles);
+        $total += $this->storeAttachmentFiles($letter, 'Nota Dinas', $this->memoFiles);
+        $total += $this->storeAttachmentFiles($letter, 'Dokumen Pendukung', $this->supportingFiles);
+
+        $this->attachmentFiles = [];
+        $this->memoFiles = [];
+        $this->supportingFiles = [];
+
+        ActivityLog::record('letter.attachments_uploaded', $total.' dokumen tambahan diunggah untuk surat '.$letter->number, $letter);
+        $this->dispatch('notify', message: 'Dokumen tambahan berhasil diunggah.');
+    }
+
+    public function startSignatureWorkflow(int $letterId): void
+    {
+        abort_unless($this->canManageLetters(), 403);
+
+        $letter = Letter::with('approvals')->findOrFail($letterId);
+        abort_unless($letter->type === 'Keluar', 403);
+
+        if ($letter->approvals->isEmpty()) {
+            foreach ($this->approvalSteps() as $step) {
+                $letter->approvals()->create($step);
+            }
+        }
+
+        $letter->update(['status' => 'Menunggu Paraf']);
+
+        ActivityLog::record('letter.signature_workflow_started', 'Alur paraf dan tanda tangan dimulai untuk surat '.$letter->number, $letter);
+        $this->dispatch('notify', message: 'Alur paraf dan tanda tangan dimulai.');
+    }
+
+    public function approveLetterStep(int $approvalId): void
+    {
+        $approval = LetterApproval::with('letter.approvals')->findOrFail($approvalId);
+
+        abort_unless($this->canActOnApproval($approval), 403);
+        abort_unless($approval->status === 'Menunggu', 422);
+
+        $user = auth()->user();
+        $approval->update([
+            'status' => $approval->step === 'Tanda Tangan Elektronik' ? 'Ditandatangani' : 'Disetujui',
+            'actor_name' => $user?->name,
+            'actor_role' => $user?->role,
+            'acted_at' => now(),
+        ]);
+
+        $approval->letter->update(['status' => $this->nextSignatureStatus($approval)]);
+
+        ActivityLog::record(
+            'letter.approval_completed',
+            $approval->step.' selesai untuk surat '.$approval->letter->number,
+            $approval,
+            ['letter_id' => $approval->letter_id],
+        );
+
+        $this->dispatch('notify', message: $approval->step.' berhasil diproses.');
+    }
+
+    public function approvalSteps(): array
+    {
+        return [
+            [
+                'step' => 'Paraf Konsep',
+                'target_role' => 'Kepala Bagian',
+                'status' => 'Menunggu',
+                'sort_order' => 1,
+            ],
+            [
+                'step' => 'Persetujuan Pimpinan',
+                'target_role' => 'Pimpinan MRP',
+                'status' => 'Menunggu',
+                'sort_order' => 2,
+            ],
+            [
+                'step' => 'Tanda Tangan Elektronik',
+                'target_role' => 'Pimpinan MRP',
+                'status' => 'Menunggu',
+                'sort_order' => 3,
+            ],
+        ];
+    }
+
+    public function canActOnApproval(LetterApproval $approval): bool
+    {
+        $user = auth()->user();
+
+        if (! $user || $approval->status !== 'Menunggu') {
+            return false;
+        }
+
+        $previousPending = $approval->letter
+            ->approvals
+            ->where('sort_order', '<', $approval->sort_order)
+            ->contains(fn (LetterApproval $item) => in_array($item->status, ['Menunggu', 'Ditolak'], true));
+
+        if ($previousPending) {
+            return false;
+        }
+
+        return match ($approval->step) {
+            'Paraf Konsep' => $user->isAdmin() || $user->isDepartmentHead(),
+            'Persetujuan Pimpinan', 'Tanda Tangan Elektronik' => $user->isAdmin() || $user->isLeader(),
+            default => false,
+        };
+    }
+
+    public function nextSignatureStatus(LetterApproval $approval): string
+    {
+        return match ($approval->step) {
+            'Paraf Konsep' => 'Menunggu Persetujuan',
+            'Persetujuan Pimpinan' => 'Menunggu Tanda Tangan',
+            'Tanda Tangan Elektronik' => 'Selesai',
+            default => $approval->letter->status,
+        };
+    }
+
+    public function storeAttachmentFiles(Letter $letter, string $category, array $files): int
+    {
+        $stored = 0;
+
+        foreach ($files as $file) {
+            if (! $file) {
+                continue;
+            }
+
+            $letter->attachments()->create([
+                'category' => $category,
+                'original_name' => $file->getClientOriginalName(),
+                'file_path' => $file->store('lampiran-surat', 'public'),
+                'mime_type' => $file->getMimeType(),
+                'size' => $file->getSize(),
+            ]);
+
+            $stored++;
+        }
+
+        return $stored;
     }
 
     public function openDispositionForm(int $letterId): void
@@ -155,8 +636,9 @@ new class extends Component
 
         $this->resetValidation();
         $this->selectedLetterId = $letterId;
-        $this->recipientName = 'Staf Administrasi';
+        $this->recipientId = $this->dispositionRecipients()->first()?->id;
         $this->instruction = '';
+        $this->showDetailModal = false;
         $this->showDispositionForm = true;
     }
 
@@ -165,23 +647,31 @@ new class extends Component
         abort_unless($this->canDispose(), 403);
 
         $validated = $this->validate([
-            'recipientName' => ['required', 'string', 'max:255'],
+            'recipientId' => ['required', Rule::exists('disposition_recipients', 'id')->where('is_active', true)],
             'instruction' => ['required', 'string', 'max:1000'],
         ]);
 
         $letter = $this->selectedLetter();
-        if (! $letter) {
+        $recipient = DispositionRecipient::find($validated['recipientId']);
+        if (! $letter || ! $recipient) {
             return;
         }
 
-        $letter->dispositions()->create([
+        $disposition = $letter->dispositions()->create([
             'sender_name' => 'Pimpinan',
-            'recipient_name' => $validated['recipientName'],
+            'recipient_name' => $recipient->name,
+            'disposition_recipient_id' => $recipient->id,
             'instruction' => $validated['instruction'],
             'status' => 'Belum Dibaca',
         ]);
 
         $letter->update(['status' => 'Disposisi']);
+        ActivityLog::record(
+            'disposition.created',
+            'Disposisi dikirim ke '.$recipient->name.' untuk surat '.$letter->number,
+            $disposition,
+            ['letter_id' => $letter->id],
+        );
         $this->showDispositionForm = false;
         $this->dispatch('notify', message: 'Disposisi terkirim ke staf terkait.');
     }
@@ -190,7 +680,10 @@ new class extends Component
     {
         abort_unless($this->canUpdateStatus(), 403);
 
-        Letter::whereKey($letterId)->update(['status' => $status]);
+        $letter = Letter::findOrFail($letterId);
+        $letter->update(['status' => $status]);
+
+        ActivityLog::record('letter.status_updated', 'Status surat '.$letter->number.' diperbarui menjadi '.$status.'.', $letter);
         $this->dispatch('notify', message: 'Status surat diperbarui.');
     }
 
@@ -200,6 +693,16 @@ new class extends Component
     }
 
     public function canManageLetters(): bool
+    {
+        return auth()->user()?->isAdmin() ?? false;
+    }
+
+    public function canEditLetters(): bool
+    {
+        return auth()->user()?->isAdmin() ?? false;
+    }
+
+    public function canDeleteLetters(): bool
     {
         return auth()->user()?->isAdmin() ?? false;
     }
@@ -223,12 +726,88 @@ new class extends Component
         return auth()->user()?->isAdmin() ?? false;
     }
 
-    public function nextLetterNumber(?string $unitCode = null): string
+    public function nextLetterNumber(?string $unitCode = null, ?string $classificationCode = null): string
     {
-        $unitCode = in_array($unitCode, ['SET-MRP', 'MRP'], true) ? $unitCode : 'SET-MRP';
-        $next = Letter::where('type', 'Keluar')->where('unit_code', $unitCode)->count() + 19;
+        $unitCode = $this->normalizeUnitCode($unitCode);
+        $numbering = $this->numberingSettings();
+        $separator = $numbering['separator'];
+        $parts = [
+            $classificationCode ?: $numbering['prefix'],
+            str_pad((string) $numbering['next_sequence'], 3, '0', STR_PAD_LEFT),
+            $unitCode,
+        ];
 
-        return '800/'.str_pad((string) $next, 3, '0', STR_PAD_LEFT).'/'.$unitCode.'/'.now()->format('m').'/'.now()->format('Y');
+        if ($numbering['include_month']) {
+            $parts[] = now()->format('m');
+        }
+
+        if ($numbering['include_year']) {
+            $parts[] = now()->format('Y');
+        }
+
+        return implode($separator, $parts);
+    }
+
+    public function defaultOutgoingBody(): string
+    {
+        return "Dengan hormat,\n\nSehubungan dengan perihal tersebut di atas, bersama ini kami sampaikan surat ini untuk menjadi perhatian dan tindak lanjut sebagaimana mestinya.\n\nDemikian disampaikan. Atas perhatian dan kerja samanya, kami ucapkan terima kasih.";
+    }
+
+    public function nextAgendaNumber(?string $unitCode = null): string
+    {
+        $unitCode = $this->normalizeUnitCode($unitCode);
+        $year = now()->format('Y');
+        $next = Letter::query()
+            ->where('type', 'Masuk')
+            ->where('unit_code', $unitCode)
+            ->whereYear('received_date', $year)
+            ->count() + 1;
+
+        return 'AG/'.$unitCode.'/'.$year.'/'.str_pad((string) $next, 4, '0', STR_PAD_LEFT);
+    }
+
+    public function numberingSettings(): array
+    {
+        $numbering = AppSetting::getValue('letter_numbering', [
+            'prefix' => '800',
+            'separator' => '/',
+            'include_month' => true,
+            'include_year' => true,
+            'next_sequence' => 1,
+        ]);
+
+        return [
+            'prefix' => (string) ($numbering['prefix'] ?? '800'),
+            'separator' => (string) ($numbering['separator'] ?? '/'),
+            'include_month' => (bool) ($numbering['include_month'] ?? true),
+            'include_year' => (bool) ($numbering['include_year'] ?? true),
+            'next_sequence' => max(1, (int) ($numbering['next_sequence'] ?? 1)),
+        ];
+    }
+
+    public function advanceNextLetterSequence(string $number): void
+    {
+        $numbering = AppSetting::getValue('letter_numbering', [
+            'prefix' => '800',
+            'unit_code' => $this->defaultUnitCode(),
+            'separator' => '/',
+            'include_month' => true,
+            'include_year' => true,
+            'next_sequence' => 1,
+        ]);
+
+        $separator = (string) ($numbering['separator'] ?? '/');
+        $parts = $separator !== '' ? explode($separator, $number) : [];
+        $sequence = isset($parts[1]) && ctype_digit($parts[1]) ? (int) $parts[1] : null;
+
+        if ($sequence === null) {
+            return;
+        }
+
+        AppSetting::putValue('letter_numbering', [
+            ...$numbering,
+            'next_sequence' => max((int) ($numbering['next_sequence'] ?? 1), $sequence + 1),
+        ]);
     }
 
     public function statusClass(string $status): string
@@ -237,6 +816,9 @@ new class extends Component
             'Baru' => 'bg-rose-100 text-rose-700 ring-rose-200',
             'Disposisi' => 'bg-amber-100 text-amber-700 ring-amber-200',
             'Diproses' => 'bg-indigo-100 text-indigo-700 ring-indigo-200',
+            'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan' => 'bg-sky-100 text-sky-700 ring-sky-200',
+            'Disetujui', 'Ditandatangani' => 'bg-emerald-100 text-emerald-700 ring-emerald-200',
+            'Menunggu' => 'bg-amber-100 text-amber-700 ring-amber-200',
             'Selesai' => 'bg-emerald-100 text-emerald-700 ring-emerald-200',
             default => 'bg-slate-100 text-slate-700 ring-slate-200',
         };
@@ -251,9 +833,35 @@ new class extends Component
 
     public function unitClass(string $unitCode): string
     {
-        return $unitCode === 'SET-MRP'
+        return collect($this->unitCodes())->search($unitCode) % 2 === 0
             ? 'bg-teal-100 text-teal-700 ring-teal-200'
             : 'bg-orange-100 text-orange-700 ring-orange-200';
+    }
+
+    public function urgencyClass(string $urgency): string
+    {
+        return match ($urgency) {
+            'Sangat Segera' => 'bg-rose-100 text-rose-700 ring-rose-200',
+            'Segera' => 'bg-amber-100 text-amber-700 ring-amber-200',
+            default => 'bg-slate-100 text-slate-700 ring-slate-200',
+        };
+    }
+
+    public function dueClass(?Letter $letter): string
+    {
+        if (! $letter?->due_date || $letter->status === 'Selesai') {
+            return 'bg-slate-100 text-slate-600 ring-slate-200';
+        }
+
+        if ($letter->due_date->isPast() && ! $letter->due_date->isToday()) {
+            return 'bg-rose-100 text-rose-700 ring-rose-200';
+        }
+
+        if ($letter->due_date->betweenIncluded(today(), today()->addDays(3))) {
+            return 'bg-amber-100 text-amber-700 ring-amber-200';
+        }
+
+        return 'bg-emerald-100 text-emerald-700 ring-emerald-200';
     }
 };
 ?>
@@ -264,71 +872,57 @@ new class extends Component
     @php
         $letters = $this->letters();
         $selectedLetter = $this->selectedLetter();
+        $classifications = $this->archiveClassifications();
+        $dispositionRecipients = $this->dispositionRecipients();
         $currentUser = auth()->user();
-        $setIncomingCount = App\Models\Letter::where('unit_code', 'SET-MRP')->where('type', 'Masuk')->count();
-        $setOutgoingCount = App\Models\Letter::where('unit_code', 'SET-MRP')->where('type', 'Keluar')->count();
-        $mrpIncomingCount = App\Models\Letter::where('unit_code', 'MRP')->where('type', 'Masuk')->count();
-        $mrpOutgoingCount = App\Models\Letter::where('unit_code', 'MRP')->where('type', 'Keluar')->count();
+        $agencyProfile = AppSetting::agency();
+        $taskCount = TaskInbox::countFor($currentUser);
+        $units = $this->units();
+        $unitSummaries = $this->unitSummaries();
+        $overdueCount = App\Models\Letter::whereNotNull('due_date')->whereDate('due_date', '<', today())->where('status', '!=', 'Selesai')->count();
+        $dueSoonCount = App\Models\Letter::whereNotNull('due_date')->whereBetween('due_date', [today(), today()->addDays(3)])->where('status', '!=', 'Selesai')->count();
     @endphp
 
-    <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:min-h-screen">
+    <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
-            <div class="grid h-11 w-11 place-items-center rounded-lg bg-teal-100 font-bold text-teal-800">ES</div>
+            <div class="grid h-11 w-11 place-items-center rounded-lg bg-teal-100 font-bold text-teal-800">{{ $agencyProfile['short_name'] }}</div>
             <div>
-                <div class="font-semibold">E-Surat</div>
-                <div class="text-sm text-slate-400">Sekretariat MRP Papua Tengah</div>
+                <div class="font-semibold">{{ $agencyProfile['app_name'] }}</div>
+                <div class="text-sm text-slate-400">{{ $agencyProfile['name'] }}</div>
             </div>
         </div>
 
-        <nav x-data="{ incomingOpen: true, outgoingOpen: true }" class="mt-8 flex gap-2 overflow-x-auto lg:grid lg:overflow-visible">
+        <nav class="mt-8 flex gap-2 overflow-x-auto lg:grid lg:overflow-visible">
             <button type="button"
                     wire:click="setCombinedFilter('Semua', 'Semua')"
                     class="rounded-lg px-3 py-2 text-left text-sm font-semibold transition {{ $typeFilter === 'Semua' && $unitFilter === 'Semua' ? 'bg-white/10 text-white' : 'text-slate-300 hover:bg-white/5' }}">
                 Dasbor
             </button>
+            <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <span>Tugas Saya</span>
+                @if ($taskCount > 0)
+                    <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
+                @endif
+            </a>
 
-            <div class="min-w-40 lg:min-w-0">
+            @if ($this->canDispose())
                 <button type="button"
-                        x-on:click="incomingOpen = ! incomingOpen"
-                        class="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
-                    <span>Surat Masuk</span>
-                    <span x-text="incomingOpen ? '−' : '+'" class="text-slate-400"></span>
+                        wire:click="openDispositionForm({{ $selectedLetterId ?? 0 }})"
+                        @disabled(! $selectedLetterId)
+                        class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50">
+                    Disposisi
                 </button>
-                <div x-show="incomingOpen" class="mt-1 grid gap-1 pl-3">
-                    @foreach (['SET-MRP', 'MRP'] as $unit)
-                        <button type="button"
-                                wire:click="setCombinedFilter('Masuk', '{{ $unit }}')"
-                                class="rounded-lg px-3 py-2 text-left text-sm font-semibold transition {{ $typeFilter === 'Masuk' && $unitFilter === $unit ? 'bg-white/10 text-white' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200' }}">
-                            {{ $unit }}
-                        </button>
-                    @endforeach
-                </div>
-            </div>
-
-            <div class="min-w-40 lg:min-w-0">
-                <button type="button"
-                        x-on:click="outgoingOpen = ! outgoingOpen"
-                        class="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
-                    <span>Surat Keluar</span>
-                    <span x-text="outgoingOpen ? '−' : '+'" class="text-slate-400"></span>
-                </button>
-                <div x-show="outgoingOpen" class="mt-1 grid gap-1 pl-3">
-                    @foreach (['SET-MRP', 'MRP'] as $unit)
-                        <button type="button"
-                                wire:click="setCombinedFilter('Keluar', '{{ $unit }}')"
-                                class="rounded-lg px-3 py-2 text-left text-sm font-semibold transition {{ $typeFilter === 'Keluar' && $unitFilter === $unit ? 'bg-white/10 text-white' : 'text-slate-400 hover:bg-white/5 hover:text-slate-200' }}">
-                            {{ $unit }}
-                        </button>
-                    @endforeach
-                </div>
-            </div>
-
-            <button type="button"
-                    wire:click="openDispositionForm({{ $selectedLetterId ?? 0 }})"
-                    @disabled(! $selectedLetterId || ! $this->canDispose())
-                    class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50">
-                Disposisi
-            </button>
+            @endif
+            @if ($currentUser?->isAdmin() || $currentUser?->isLeader())
+                <a href="{{ route('leadership') }}" class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    Halaman Pimpinan
+                </a>
+            @endif
+            @if ($currentUser?->isAdmin() || $currentUser?->isDepartmentHead())
+                <a href="{{ route('department-head') }}" class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    Halaman Kepala Bagian
+                </a>
+            @endif
             @if ($this->canManageSettings())
                 <a href="{{ route('settings') }}" class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                     Setting
@@ -346,11 +940,11 @@ new class extends Component
     </aside>
 
     <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
-        <header class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <header class="sticky top-0 z-10 -mx-4 flex flex-col gap-4 border-b border-slate-200 bg-slate-100/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 xl:flex-row xl:items-start xl:justify-between">
             <div>
                 <p class="text-xs font-bold uppercase text-teal-700">Rabu, 6 Mei 2026</p>
-                <h1 class="mt-1 text-3xl font-bold tracking-normal text-slate-950">Dasbor Persuratan MRP</h1>
-                <p class="mt-2 max-w-2xl text-sm text-slate-600">Pengelolaan surat Sekretariat MRP dan MRP Provinsi Papua Tengah.</p>
+                <h1 class="mt-1 text-3xl font-bold tracking-normal text-slate-950">Dasbor Persuratan {{ $agencyProfile['short_name'] }}</h1>
+                <p class="mt-2 max-w-2xl text-sm text-slate-600">Pengelolaan surat {{ $agencyProfile['name'] }}.</p>
             </div>
             <div class="flex flex-col gap-2 sm:flex-row xl:justify-end">
                 <label class="flex min-h-11 w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 shadow-sm sm:w-96">
@@ -358,18 +952,19 @@ new class extends Component
                     <input wire:model.live.debounce.250ms="search"
                            type="search"
                            class="w-full border-0 bg-transparent text-sm outline-none"
-                           placeholder="Cari nomor, perihal, pihak luar...">
+                           placeholder="Cari nomor, agenda, perihal, pihak luar...">
                 </label>
                 @if ($this->canManageLetters())
+                    @php($actionUnit = $unitFilter === 'Semua' ? $this->defaultUnitCode() : $unitFilter)
                     <button type="button"
-                            wire:click="openLetterForm('Keluar', '{{ $unitFilter === 'Semua' ? 'SET-MRP' : $unitFilter }}')"
+                            wire:click="openLetterForm('Masuk', '{{ $actionUnit }}')"
                             class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
-                        # Generate
+                        + Input Surat Masuk
                     </button>
                     <button type="button"
-                            wire:click="openLetterForm"
+                            wire:click="openLetterForm('Keluar', '{{ $actionUnit }}')"
                             class="inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-teal-800">
-                        + Catat Surat
+                        + Input Surat Keluar
                     </button>
                 @endif
                 <form method="POST" action="{{ route('logout') }}">
@@ -381,51 +976,62 @@ new class extends Component
             </div>
         </header>
 
-        <section class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="text-sm text-slate-500">SET-MRP Masuk</div>
-                <div class="mt-2 text-3xl font-bold">{{ $setIncomingCount }}</div>
-                <div class="text-sm text-slate-500">surat sekretariat</div>
+        <section class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+            @foreach ($unitSummaries as $unit)
+                <div class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="text-sm text-slate-500">{{ $unit['code'] }} Masuk</div>
+                    <div class="mt-2 text-3xl font-bold">{{ $unit['incoming_count'] }}</div>
+                    <div class="text-sm text-slate-500">{{ $unit['name'] }}</div>
+                </div>
+                <div class="rounded-lg border border-orange-200 bg-orange-50 p-5 shadow-sm">
+                    <div class="text-sm text-orange-700">{{ $unit['code'] }} Keluar</div>
+                    <div class="mt-2 text-3xl font-bold">{{ $unit['outgoing_count'] }}</div>
+                    <div class="text-sm text-orange-700">{{ $unit['name'] }}</div>
+                </div>
+            @endforeach
+            <div class="rounded-lg border border-rose-200 bg-rose-50 p-5 shadow-sm">
+                <div class="text-sm text-rose-700">Lewat Batas</div>
+                <div class="mt-2 text-3xl font-bold">{{ $overdueCount }}</div>
+                <div class="text-sm text-rose-700">butuh tindak lanjut</div>
             </div>
-            <div class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                <div class="text-sm text-slate-500">SET-MRP Keluar</div>
-                <div class="mt-2 text-3xl font-bold">{{ $setOutgoingCount }}</div>
-                <div class="text-sm text-slate-500">nomor sekretariat</div>
-            </div>
-            <div class="rounded-lg border border-orange-200 bg-orange-50 p-5 shadow-sm">
-                <div class="text-sm text-orange-700">MRP Masuk</div>
-                <div class="mt-2 text-3xl font-bold">{{ $mrpIncomingCount }}</div>
-                <div class="text-sm text-orange-700">surat lembaga MRP</div>
-            </div>
-            <div class="rounded-lg border border-orange-200 bg-orange-50 p-5 shadow-sm">
-                <div class="text-sm text-orange-700">MRP Keluar</div>
-                <div class="mt-2 text-3xl font-bold">{{ $mrpOutgoingCount }}</div>
-                <div class="text-sm text-orange-700">nomor lembaga MRP</div>
+            <div class="rounded-lg border border-amber-200 bg-amber-50 p-5 shadow-sm">
+                <div class="text-sm text-amber-700">Dekat Tenggat</div>
+                <div class="mt-2 text-3xl font-bold">{{ $dueSoonCount }}</div>
+                <div class="text-sm text-amber-700">dalam 3 hari</div>
             </div>
         </section>
 
-        <section class="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(340px,0.8fr)]">
+        <section class="mt-5">
             <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
                 <div class="flex flex-col gap-3 border-b border-slate-200 p-5 xl:flex-row xl:items-center xl:justify-between">
                     <div>
                         <h2 class="text-lg font-bold">Daftar Surat</h2>
-                        <p class="text-sm text-slate-500">{{ $letters->count() }} surat ditampilkan{{ $search ? ' dari pencarian langsung' : '' }}</p>
+                        <p class="text-sm text-slate-500">
+                            @if ($letters->total() > 0)
+                                Menampilkan {{ $letters->firstItem() }}-{{ $letters->lastItem() }} dari {{ $letters->total() }} surat{{ $search ? ' dari pencarian langsung' : '' }}
+                            @else
+                                Tidak ada surat ditampilkan
+                            @endif
+                        </p>
                     </div>
-                    <div class="flex flex-col gap-2 sm:flex-row">
-                        <div class="inline-flex rounded-lg bg-slate-100 p-1">
+                    <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+                        <a href="{{ $this->exportUrl() }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 hover:border-teal-600">
+                            Export CSV
+                        </a>
+                        <div class="inline-flex overflow-x-auto rounded-lg bg-slate-100 p-1">
                             @foreach (['Semua', 'Masuk', 'Keluar'] as $filter)
                                 <button type="button"
                                         wire:click="setFilter('{{ $filter }}')"
-                                        class="rounded-md px-3 py-1.5 text-sm font-bold {{ $typeFilter === $filter ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}">
+                                        class="whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-bold {{ $typeFilter === $filter ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}">
                                     {{ $filter }}
                                 </button>
                             @endforeach
                         </div>
-                        <div class="inline-flex rounded-lg bg-slate-100 p-1">
-                            @foreach (['Semua', 'SET-MRP', 'MRP'] as $filter)
+                        <div class="inline-flex overflow-x-auto rounded-lg bg-slate-100 p-1">
+                            @foreach (['Semua', ...collect($units)->pluck('code')->all()] as $filter)
                                 <button type="button"
                                         wire:click="setUnitFilter('{{ $filter }}')"
-                                        class="rounded-md px-3 py-1.5 text-sm font-bold {{ $unitFilter === $filter ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}">
+                                        class="whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-bold {{ $unitFilter === $filter ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}">
                                     {{ $filter }}
                                 </button>
                             @endforeach
@@ -433,27 +1039,75 @@ new class extends Component
                     </div>
                 </div>
 
+                <div class="grid gap-3 border-b border-slate-200 bg-slate-50 p-5 md:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
+                    <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
+                        Status
+                        <select wire:model.live="statusFilter" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                            @foreach (['Semua', 'Baru', 'Disposisi', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Selesai'] as $status)
+                                <option value="{{ $status }}">{{ $status }}</option>
+                            @endforeach
+                        </select>
+                    </label>
+                    <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
+                        Prioritas
+                        <select wire:model.live="urgencyFilter" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                            @foreach (['Semua', 'Normal', 'Segera', 'Sangat Segera'] as $urgencyOption)
+                                <option value="{{ $urgencyOption }}">{{ $urgencyOption }}</option>
+                            @endforeach
+                        </select>
+                    </label>
+                    <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
+                        Tenggat
+                        <select wire:model.live="dueFilter" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                            @foreach (['Semua', 'Lewat Batas', 'Dekat Tenggat', 'Tanpa Batas'] as $dueOption)
+                                <option value="{{ $dueOption }}">{{ $dueOption }}</option>
+                            @endforeach
+                        </select>
+                    </label>
+                    <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
+                        Dari Tanggal
+                        <input wire:model.live="dateFrom" type="date" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                    </label>
+                    <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
+                        Sampai Tanggal
+                        <input wire:model.live="dateTo" type="date" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                    </label>
+                    <div class="flex items-end">
+                        <button type="button" wire:click="resetAdvancedFilters" class="min-h-10 w-full rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:border-teal-600">
+                            Reset
+                        </button>
+                    </div>
+                </div>
+
                 <div class="overflow-x-auto">
-                    <table class="min-w-[920px] w-full border-collapse text-left text-sm">
+                    <table class="min-w-[1180px] w-full border-collapse text-left text-sm">
                         <thead class="text-xs uppercase text-slate-500">
                             <tr>
                                 <th class="border-b border-slate-200 px-5 py-3">Nomor</th>
                                 <th class="border-b border-slate-200 px-5 py-3">Jenis</th>
                                 <th class="border-b border-slate-200 px-5 py-3">Unit</th>
+                                <th class="border-b border-slate-200 px-5 py-3">Kode Arsip</th>
                                 <th class="border-b border-slate-200 px-5 py-3">Perihal</th>
                                 <th class="border-b border-slate-200 px-5 py-3">Pihak Luar</th>
+                                <th class="border-b border-slate-200 px-5 py-3">Prioritas</th>
+                                <th class="border-b border-slate-200 px-5 py-3">Tenggat</th>
                                 <th class="border-b border-slate-200 px-5 py-3">Status</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
                             @forelse ($letters as $letter)
-                                <tr wire:key="letter-{{ $letter->id }}" class="{{ $selectedLetterId === $letter->id ? 'bg-teal-50' : 'hover:bg-slate-50' }}">
+                                <tr wire:key="letter-{{ $letter->id }}"
+                                    wire:click="openDetailModal({{ $letter->id }})"
+                                    wire:keydown.enter="openDetailModal({{ $letter->id }})"
+                                    role="button"
+                                    tabindex="0"
+                                    class="cursor-pointer transition {{ $selectedLetterId === $letter->id ? 'bg-teal-50' : 'hover:bg-slate-50' }}">
                                     <td class="border-b border-slate-100 px-5 py-4">
-                                        <button type="button" wire:click="selectLetter({{ $letter->id }})" class="text-left font-bold text-slate-950">
-                                            {{ $letter->number }}
-                                        </button>
+                                        <div class="font-bold text-slate-950">{{ $letter->number }}</div>
                                         <div class="text-xs text-slate-500">{{ $letter->letter_date->translatedFormat('d F Y') }}</div>
+                                        @if ($letter->agenda_number)
+                                            <div class="mt-1 text-xs font-semibold text-teal-700">{{ $letter->agenda_number }}</div>
+                                        @endif
                                     </td>
                                     <td class="border-b border-slate-100 px-5 py-4">
                                         <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->typeClass($letter->type) }}">{{ $letter->type }}</span>
@@ -461,23 +1115,33 @@ new class extends Component
                                     <td class="border-b border-slate-100 px-5 py-4">
                                         <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->unitClass($letter->unit_code) }}">{{ $letter->unit_code }}</span>
                                     </td>
+                                    <td class="border-b border-slate-100 px-5 py-4">
+                                        @if ($letter->classification_code)
+                                            <div class="font-bold text-slate-950">{{ $letter->classification_code }}</div>
+                                            <div class="max-w-44 truncate text-xs text-slate-500">{{ $letter->classification?->name }}</div>
+                                        @else
+                                            <span class="text-xs text-slate-400">Belum dipilih</span>
+                                        @endif
+                                    </td>
                                     <td class="border-b border-slate-100 px-5 py-4">{{ $letter->subject }}</td>
                                     <td class="border-b border-slate-100 px-5 py-4">{{ $letter->external_party }}</td>
                                     <td class="border-b border-slate-100 px-5 py-4">
-                                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($letter->status) }}">{{ $letter->status }}</span>
+                                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->urgencyClass($letter->urgency) }}">{{ $letter->urgency }}</span>
                                     </td>
                                     <td class="border-b border-slate-100 px-5 py-4">
-                                        <div class="flex gap-2">
-                                            <button type="button" wire:click="selectLetter({{ $letter->id }})" class="rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Detail</button>
-                                            @if ($this->canDispose())
-                                                <button type="button" wire:click="openDispositionForm({{ $letter->id }})" class="rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Disposisi</button>
-                                            @endif
-                                        </div>
+                                        @if ($letter->due_date)
+                                            <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->dueClass($letter) }}">{{ $letter->due_date->translatedFormat('d M Y') }}</span>
+                                        @else
+                                            <span class="text-xs text-slate-400">Tanpa batas</span>
+                                        @endif
+                                    </td>
+                                    <td class="border-b border-slate-100 px-5 py-4">
+                                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($letter->status) }}">{{ $letter->status }}</span>
                                     </td>
                                 </tr>
                             @empty
                                 <tr>
-                                    <td colspan="7" class="px-5 py-16 text-center text-slate-500">
+                                    <td colspan="9" class="px-5 py-16 text-center text-slate-500">
                                         Tidak ada surat yang cocok dengan filter saat ini.
                                     </td>
                                 </tr>
@@ -485,50 +1149,291 @@ new class extends Component
                         </tbody>
                     </table>
                 </div>
+                @if ($letters->hasPages())
+                    <div class="border-t border-slate-200 p-5">
+                        {{ $letters->links() }}
+                    </div>
+                @endif
             </div>
 
-            <aside class="rounded-lg border border-slate-200 bg-white shadow-sm">
-                <div class="border-b border-slate-200 p-5">
-                    <h2 class="text-lg font-bold">Detail Surat</h2>
-                    <p class="text-sm text-slate-500">{{ $selectedLetter ? $selectedLetter->unit_code.' | '.$selectedLetter->type.' | '.$selectedLetter->number : 'Pilih surat dari daftar' }}</p>
-                </div>
+        </section>
 
-                @if ($selectedLetter)
-                    <div class="space-y-5 p-5">
-                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($selectedLetter->status) }}">{{ $selectedLetter->status }}</span>
+        @if ($showDetailModal && $selectedLetter)
+            <div class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
+                <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-white shadow-xl">
+                    <div class="flex items-start justify-between gap-4 border-b border-slate-200 p-6">
+                        <div>
+                            <p class="text-xs font-bold uppercase text-teal-700">{{ $selectedLetter->unit_code }} | {{ $selectedLetter->type }}</p>
+                            <h2 class="mt-1 text-xl font-bold">Detail Surat</h2>
+                            <p class="mt-1 text-sm text-slate-500">{{ $selectedLetter->number }}</p>
+                        </div>
+                        <button type="button" wire:click="$set('showDetailModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">×</button>
+                    </div>
 
-                        <div class="space-y-3">
-                            <div>
-                                <div class="text-xs font-bold uppercase text-slate-500">Unit</div>
-                                <span class="mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->unitClass($selectedLetter->unit_code) }}">{{ $selectedLetter->unit_code }}</span>
+                    <div class="space-y-5 p-6">
+                        <div class="flex flex-wrap gap-2">
+                            <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($selectedLetter->status) }}">{{ $selectedLetter->status }}</span>
+                            <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->unitClass($selectedLetter->unit_code) }}">{{ $selectedLetter->unit_code }}</span>
+                            <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->typeClass($selectedLetter->type) }}">{{ $selectedLetter->type }}</span>
+                            @if ($selectedLetter->type === 'Keluar' && $selectedLetter->outgoing_input_mode)
+                                <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-700 ring-1 ring-slate-200">
+                                    {{ $selectedLetter->outgoing_input_mode === 'template' ? 'Dibuat dari Template' : 'Upload Surat Jadi' }}
+                                </span>
+                            @endif
+                        </div>
+                        @if ($this->canDispose() || $this->canEditLetters() || $this->canDeleteLetters() || $selectedLetter->file_path || ($selectedLetter->type === 'Keluar' && $selectedLetter->outgoing_body))
+                            <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                <div class="text-sm font-bold text-slate-700">Aksi Surat</div>
+                                <div class="mt-3 flex flex-wrap gap-2">
+                                    @if ($this->canDispose())
+                                        <button type="button" wire:click="openDispositionForm({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Disposisi</button>
+                                    @endif
+                                    @if ($this->canEditLetters())
+                                        <button type="button" wire:click="openEditLetterForm({{ $selectedLetter->id }})" class="min-h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Edit Surat</button>
+                                    @endif
+                                    @if ($selectedLetter->file_path)
+                                        <a href="{{ route('letters.document.review', $selectedLetter) }}" target="_blank" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Review Dokumen</a>
+                                        <a href="{{ route('letters.document.download', $selectedLetter) }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Download</a>
+                                    @endif
+                                    @if ($selectedLetter->type === 'Keluar' && $selectedLetter->outgoing_body)
+                                        <a href="{{ route('letters.template.pdf', $selectedLetter) }}" target="_blank" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Preview / PDF</a>
+                                        <a href="{{ route('letters.template.docx', $selectedLetter) }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Export DOCX</a>
+                                    @endif
+                                    @if ($this->canDeleteLetters())
+                                        <button type="button" wire:click="deleteLetter({{ $selectedLetter->id }})" wire:confirm="Hapus surat ini? Data dan dokumen terkait akan ikut dihapus." class="min-h-10 rounded-lg border border-rose-200 bg-white px-4 text-sm font-bold text-rose-700 hover:border-rose-500">Hapus Surat</button>
+                                    @endif
+                                </div>
                             </div>
+                        @endif
+
+                        <div class="grid gap-4 sm:grid-cols-2">
                             <div>
-                                <div class="text-xs font-bold uppercase text-slate-500">Perihal</div>
-                                <div class="font-semibold">{{ $selectedLetter->subject }}</div>
-                            </div>
-                            <div>
-                                <div class="text-xs font-bold uppercase text-slate-500">Pihak Luar</div>
-                                <div class="font-semibold">{{ $selectedLetter->external_party }}</div>
+                                <div class="text-xs font-bold uppercase text-slate-500">Kode Klasifikasi Arsip</div>
+                                @if ($selectedLetter->classification_code)
+                                    <div class="font-semibold">{{ $selectedLetter->classification_code }} - {{ $selectedLetter->classification?->name }}</div>
+                                @else
+                                    <div class="font-semibold text-slate-400">Belum dipilih</div>
+                                @endif
                             </div>
                             <div>
                                 <div class="text-xs font-bold uppercase text-slate-500">Tanggal Surat</div>
                                 <div class="font-semibold">{{ $selectedLetter->letter_date->translatedFormat('d F Y') }}</div>
                             </div>
+                            @if ($selectedLetter->type === 'Masuk')
+                                <div>
+                                    <div class="text-xs font-bold uppercase text-slate-500">Nomor Agenda</div>
+                                    <div class="font-semibold">{{ $selectedLetter->agenda_number ?: '-' }}</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs font-bold uppercase text-slate-500">Tanggal Diterima</div>
+                                    <div class="font-semibold">{{ $selectedLetter->received_date?->translatedFormat('d F Y') ?: '-' }}</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs font-bold uppercase text-slate-500">Sifat dan Prioritas</div>
+                                    <div class="font-semibold">{{ $selectedLetter->nature }} | {{ $selectedLetter->urgency }}</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs font-bold uppercase text-slate-500">Batas Waktu</div>
+                                    <div class="font-semibold">{{ $selectedLetter->due_date?->translatedFormat('d F Y') ?: '-' }}</div>
+                                </div>
+                            @endif
+                            <div>
+                                <div class="text-xs font-bold uppercase text-slate-500">Pihak Luar</div>
+                                <div class="font-semibold">{{ $selectedLetter->external_party }}</div>
+                            </div>
+                            <div>
+                                <div class="text-xs font-bold uppercase text-slate-500">Dokumen Scan</div>
+                                @if ($selectedLetter->file_path)
+                                    <div class="font-semibold">{{ basename($selectedLetter->file_path) }}</div>
+                                    <div class="mt-2 flex flex-wrap gap-2">
+                                        <a href="{{ route('letters.document.review', $selectedLetter) }}" target="_blank" class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-bold hover:border-teal-600">Buka Review</a>
+                                        <a href="{{ route('letters.document.download', $selectedLetter) }}" class="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800">Download</a>
+                                    </div>
+                                @else
+                                    <div class="font-semibold text-slate-400">Belum ada dokumen terunggah</div>
+                                @endif
+                            </div>
+                            <div class="sm:col-span-2">
+                                <div class="text-xs font-bold uppercase text-slate-500">Perihal</div>
+                                <div class="font-semibold">{{ $selectedLetter->subject }}</div>
+                            </div>
+                            @if ($selectedLetter->type === 'Keluar' && $selectedLetter->outgoing_body)
+                                <div class="sm:col-span-2">
+                                    <div class="text-xs font-bold uppercase text-slate-500">Naskah Surat Keluar</div>
+                                    <div class="mt-1 whitespace-pre-line rounded-lg bg-slate-50 p-3 text-sm text-slate-700">{{ $selectedLetter->outgoing_body }}</div>
+                                    <div class="mt-3 flex flex-wrap gap-2">
+                                        <a href="{{ route('letters.template.pdf', $selectedLetter) }}" target="_blank" class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-bold hover:border-teal-600">Preview / PDF</a>
+                                        <a href="{{ route('letters.template.docx', $selectedLetter) }}" class="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800">Export DOCX</a>
+                                    </div>
+                                </div>
+                            @endif
                         </div>
 
-                        <div class="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4">
-                            <div class="font-semibold">{{ $selectedLetter->file_path ? basename($selectedLetter->file_path) : 'Belum ada dokumen terunggah' }}</div>
-                            <div class="text-sm text-slate-500">Dokumen digital tersimpan di disk lokal aplikasi</div>
+                        @if ($selectedLetter->file_path)
+                            <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                    <div>
+                                        <h3 class="font-bold">Review Dokumen</h3>
+                                        <p class="text-sm text-slate-500">Preview PDF atau gambar dokumen surat.</p>
+                                    </div>
+                                    <a href="{{ route('letters.document.download', $selectedLetter) }}" class="inline-flex min-h-10 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Download</a>
+                                </div>
+                                <iframe src="{{ route('letters.document.review', $selectedLetter) }}"
+                                        class="h-[520px] w-full rounded-lg border border-slate-200 bg-white"
+                                        title="Review dokumen {{ $selectedLetter->number }}"></iframe>
+                            </div>
+                        @endif
+
+                        @if ($selectedLetter->type === 'Keluar')
+                            <div class="rounded-lg border border-slate-200 bg-white p-4">
+                                <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                    <div>
+                                        <h3 class="font-bold">Paraf dan Tanda Tangan Elektronik</h3>
+                                        <p class="text-sm text-slate-500">Alur formal konsep surat keluar sebelum dokumen dinyatakan selesai.</p>
+                                    </div>
+                                    @if ($selectedLetter->approvals->isEmpty() && $this->canManageLetters())
+                                        <button type="button" wire:click="startSignatureWorkflow({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
+                                            Mulai Alur
+                                        </button>
+                                    @endif
+                                </div>
+
+                                <div class="mt-4 space-y-3">
+                                    @forelse ($selectedLetter->approvals as $approval)
+                                        <div class="rounded-lg border border-slate-200 bg-slate-50 p-3" wire:key="approval-step-{{ $approval->id }}">
+                                            <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                                <div>
+                                                    <div class="font-semibold">{{ $approval->step }}</div>
+                                                    <div class="text-xs text-slate-500">Target: {{ $approval->target_role }}</div>
+                                                    @if ($approval->actor_name)
+                                                        <div class="mt-1 text-xs text-slate-500">
+                                                            Oleh {{ $approval->actor_name }} | {{ $approval->acted_at?->translatedFormat('d M Y H:i') }}
+                                                        </div>
+                                                    @endif
+                                                </div>
+                                                <div class="flex flex-wrap items-center gap-2">
+                                                    <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($approval->status) }}">{{ $approval->status }}</span>
+                                                    @if ($this->canActOnApproval($approval))
+                                                        @php($actionLabel = match ($approval->step) {
+                                                            'Paraf Konsep' => 'Paraf',
+                                                            'Persetujuan Pimpinan' => 'Setujui',
+                                                            'Tanda Tangan Elektronik' => 'Tanda Tangani',
+                                                            default => 'Proses',
+                                                        })
+                                                        <button type="button" wire:click="approveLetterStep({{ $approval->id }})" class="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800">
+                                                            {{ $actionLabel }}
+                                                        </button>
+                                                    @endif
+                                                </div>
+                                            </div>
+                                        </div>
+                                    @empty
+                                        <p class="text-sm text-slate-500">Alur paraf dan tanda tangan belum dimulai.</p>
+                                    @endforelse
+                                </div>
+                            </div>
+                        @endif
+
+                        <div class="rounded-lg border border-slate-200 bg-white p-4">
+                            <h3 class="font-bold">Lampiran Multi-file</h3>
+                            <div class="mt-3 space-y-3">
+                                @forelse ($selectedLetter->attachments->groupBy('category') as $category => $attachments)
+                                    <div class="rounded-lg border border-slate-200 p-3">
+                                        <div class="text-sm font-bold text-slate-700">{{ $category }}</div>
+                                        <div class="mt-2 grid gap-2">
+                                            @foreach ($attachments as $attachment)
+                                                <div class="flex flex-col gap-2 rounded-lg bg-slate-50 p-3 sm:flex-row sm:items-center sm:justify-between" wire:key="letter-attachment-{{ $attachment->id }}">
+                                                    <div class="min-w-0">
+                                                        <div class="truncate text-sm font-semibold">{{ $attachment->original_name }}</div>
+                                                        <div class="text-xs text-slate-500">{{ number_format((int) $attachment->size / 1024, 1) }} KB</div>
+                                                    </div>
+                                                    <div class="flex flex-wrap gap-2">
+                                                        <a href="{{ route('letter-attachments.review', $attachment) }}" target="_blank" class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-bold hover:border-teal-600">Review</a>
+                                                        <a href="{{ route('letter-attachments.download', $attachment) }}" class="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800">Download</a>
+                                                    </div>
+                                                </div>
+                                            @endforeach
+                                        </div>
+                                    </div>
+                                @empty
+                                    <p class="text-sm text-slate-500">Belum ada lampiran, nota dinas, atau dokumen pendukung.</p>
+                                @endforelse
+                            </div>
                         </div>
+
+                        @if ($selectedLetter->type === 'Keluar' && $this->canManageLetters())
+                            <form wire:submit="uploadOutgoingDocument({{ $selectedLetter->id }})" class="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4">
+                                <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                                    <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                        Upload Dokumen Surat Keluar
+                                        <input wire:model="outgoingDocument" type="file" accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                        <span class="text-xs font-normal text-slate-500">Bisa diunggah setelah surat disimpan. File lama akan diganti jika sudah ada.</span>
+                                        @error('outgoingDocument') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                    </label>
+                                    <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Upload File</button>
+                                </div>
+                            </form>
+                        @endif
+
+                        @if ($this->canManageLetters())
+                            <form wire:submit="uploadAdditionalDocuments({{ $selectedLetter->id }})" class="rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4">
+                                <div class="grid gap-4">
+                                    <div>
+                                        <h3 class="font-bold">Upload Dokumen Tambahan</h3>
+                                        <p class="text-sm text-slate-500">Tambahkan lampiran, nota dinas, atau dokumen pendukung setelah surat tersimpan.</p>
+                                    </div>
+                                    <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                        Lampiran
+                                        <input wire:model="attachmentFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                        @error('attachmentFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                    </label>
+                                    <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                        Nota Dinas
+                                        <input wire:model="memoFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                        @error('memoFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                    </label>
+                                    <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                        Dokumen Pendukung
+                                        <input wire:model="supportingFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                        @error('supportingFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                    </label>
+                                    <div class="flex justify-end">
+                                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Upload Dokumen Tambahan</button>
+                                    </div>
+                                </div>
+                            </form>
+                        @endif
 
                         <div class="border-t border-slate-200 pt-5">
-                            <h3 class="font-bold">Riwayat Disposisi</h3>
-                            <div class="mt-3 space-y-3">
-                                @forelse ($selectedLetter->dispositions as $disposition)
-                                    <div class="border-l-4 border-teal-700 pl-3">
-                                        <div class="font-semibold">{{ $disposition->sender_name }} ke {{ $disposition->recipient_name }}</div>
-                                        <p class="mt-1 text-sm text-slate-600">{{ $disposition->instruction }}</p>
-                                        <span class="mt-2 inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($disposition->status) }}">{{ $disposition->status }}</span>
+                            <h3 class="font-bold">Timeline Disposisi</h3>
+                            <div class="mt-3 space-y-4">
+                                @forelse ($selectedLetter->dispositions->filter(fn ($item) => $item->parent_id === null) as $disposition)
+                                    <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                            <div>
+                                                <div class="font-semibold">{{ $disposition->sender_name }} ke {{ $disposition->recipient_name }}</div>
+                                                <div class="text-xs text-slate-500">{{ $disposition->created_at->translatedFormat('d M Y H:i') }}</div>
+                                            </div>
+                                            <span class="inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($disposition->status) }}">{{ $disposition->status }}</span>
+                                        </div>
+                                        <p class="mt-2 text-sm text-slate-600">{{ $disposition->instruction }}</p>
+
+                                        @if ($disposition->children->isNotEmpty())
+                                            <div class="mt-4 space-y-3 border-l-4 border-teal-700 pl-4">
+                                                @foreach ($disposition->children as $child)
+                                                    <div class="rounded-lg border border-slate-200 bg-white p-3" wire:key="child-disposition-{{ $child->id }}">
+                                                        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                                            <div>
+                                                                <div class="font-semibold">{{ $child->sender_name }} ke {{ $child->recipient_name }}</div>
+                                                                <div class="text-xs text-slate-500">{{ $child->created_at->translatedFormat('d M Y H:i') }}</div>
+                                                            </div>
+                                                            <span class="inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($child->status) }}">{{ $child->status }}</span>
+                                                        </div>
+                                                        <p class="mt-2 text-sm text-slate-600">{{ $child->instruction }}</p>
+                                                    </div>
+                                                @endforeach
+                                            </div>
+                                        @endif
                                     </div>
                                 @empty
                                     <p class="text-sm text-slate-500">Belum ada riwayat disposisi.</p>
@@ -537,9 +1442,9 @@ new class extends Component
                         </div>
 
                         @if ($this->canUpdateStatus())
-                            <div class="flex flex-col gap-2 sm:flex-row">
+                            <div class="flex flex-col gap-2 border-t border-slate-200 pt-5 sm:flex-row sm:justify-end">
                                 <select wire:change="updateStatus({{ $selectedLetter->id }}, $event.target.value)" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
-                                    @foreach (['Baru', 'Disposisi', 'Diproses', 'Selesai'] as $status)
+                                    @foreach (['Baru', 'Disposisi', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Selesai'] as $status)
                                         <option value="{{ $status }}" @selected($selectedLetter->status === $status)>{{ $status }}</option>
                                     @endforeach
                                 </select>
@@ -547,21 +1452,17 @@ new class extends Component
                             </div>
                         @endif
                     </div>
-                @else
-                    <div class="grid min-h-80 place-items-center p-8 text-center text-slate-500">
-                        Detail, dokumen scan, dan riwayat disposisi akan tampil di sini.
-                    </div>
-                @endif
-            </aside>
-        </section>
+                </div>
+            </div>
+        @endif
 
         @if ($showLetterForm)
             <div class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
-                <form wire:submit="saveLetter" class="w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl">
+                <form wire:submit="saveLetter" class="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-6 shadow-xl">
                     <div class="flex items-start justify-between gap-4">
                         <div>
                             <p class="text-xs font-bold uppercase text-teal-700">Pencatatan Dokumen</p>
-                            <h2 class="mt-1 text-xl font-bold">Catat Surat Baru</h2>
+                            <h2 class="mt-1 text-xl font-bold">{{ $editingLetterId ? 'Edit Surat' : 'Catat Surat Baru' }}</h2>
                         </div>
                         <button type="button" wire:click="$set('showLetterForm', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">×</button>
                     </div>
@@ -577,11 +1478,81 @@ new class extends Component
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Unit Surat
                             <select wire:model.live="unitCode" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
-                                <option value="SET-MRP">SET-MRP</option>
-                                <option value="MRP">MRP</option>
+                                @foreach ($units as $unit)
+                                    <option value="{{ $unit['code'] }}">{{ $unit['code'] }} - {{ $unit['name'] }}</option>
+                                @endforeach
                             </select>
                             @error('unitCode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600 sm:col-span-2">
+                            Kode Klasifikasi Arsip
+                            <select wire:model.live="classificationCode" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <option value="">Pilih kode arsip Permendagri 83/2022</option>
+                                @foreach ($classifications as $classification)
+                                    <option value="{{ $classification->code }}">{{ $classification->code }} - {{ $classification->name }}</option>
+                                @endforeach
+                            </select>
+                            <span class="text-xs font-normal text-slate-500">Untuk surat keluar, kode ini dipakai sebagai kode awal nomor surat otomatis.</span>
+                            @error('classificationCode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        @if ($type === 'Keluar')
+                            <div class="grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
+                                <div class="font-bold text-slate-800">Pilih Cara Membuat Surat Keluar</div>
+                                <div class="grid gap-3 sm:grid-cols-2">
+                                    <label class="flex cursor-pointer gap-3 rounded-lg border bg-white p-4 {{ $outgoingInputMode === 'template' ? 'border-teal-600 ring-2 ring-teal-100' : 'border-slate-200' }}">
+                                        <input wire:model.live="outgoingInputMode" type="radio" value="template" class="mt-1 h-4 w-4 border-slate-300 text-teal-700">
+                                        <span>
+                                            <span class="block font-bold text-slate-800">Buat dari Template</span>
+                                            <span class="mt-1 block text-sm font-normal text-slate-500">Tulis naskah di sistem, lalu export PDF/DOCX.</span>
+                                        </span>
+                                    </label>
+                                    <label class="flex cursor-pointer gap-3 rounded-lg border bg-white p-4 {{ $outgoingInputMode === 'upload' ? 'border-teal-600 ring-2 ring-teal-100' : 'border-slate-200' }}">
+                                        <input wire:model.live="outgoingInputMode" type="radio" value="upload" class="mt-1 h-4 w-4 border-slate-300 text-teal-700">
+                                        <span>
+                                            <span class="block font-bold text-slate-800">Upload Surat Jadi</span>
+                                            <span class="mt-1 block text-sm font-normal text-slate-500">Nomor tetap dicatat, file final wajib diunggah.</span>
+                                        </span>
+                                    </label>
+                                </div>
+                                @error('outgoingInputMode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </div>
+                        @endif
+                        @if ($type === 'Masuk')
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Nomor Agenda
+                                <input wire:model="agendaNumber" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                @error('agendaNumber') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Tanggal Diterima
+                                <input wire:model="receivedDate" type="date" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                @error('receivedDate') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Sifat Surat
+                                <select wire:model="nature" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                    <option>Biasa</option>
+                                    <option>Penting</option>
+                                    <option>Rahasia</option>
+                                    <option>Sangat Rahasia</option>
+                                </select>
+                                @error('nature') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Prioritas
+                                <select wire:model="urgency" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                    <option>Normal</option>
+                                    <option>Segera</option>
+                                    <option>Sangat Segera</option>
+                                </select>
+                                @error('urgency') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600 sm:col-span-2">
+                                Batas Waktu Tindak Lanjut
+                                <input wire:model="dueDate" type="date" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                @error('dueDate') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                        @endif
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Tanggal Surat
                             <input wire:model="letterDate" type="date" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
@@ -593,8 +1564,8 @@ new class extends Component
                             @error('number') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
-                            Pihak Luar
-                            <input wire:model="externalParty" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Pengirim atau penerima">
+                            {{ $type === 'Keluar' ? 'Tujuan Surat' : 'Pihak Luar' }}
+                            <input wire:model="externalParty" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="{{ $type === 'Keluar' ? 'Nama penerima atau instansi tujuan' : 'Pengirim atau penerima' }}">
                             @error('externalParty') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600 sm:col-span-2">
@@ -602,17 +1573,65 @@ new class extends Component
                             <input wire:model="subject" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Ringkasan perihal surat">
                             @error('subject') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
+                        @if ($type === 'Keluar' && $outgoingInputMode === 'template')
+                            <div class="grid gap-4 rounded-lg border border-teal-100 bg-teal-50 p-4 sm:col-span-2">
+                                <div>
+                                    <div class="font-bold text-slate-800">Template Surat Keluar</div>
+                                    <p class="text-sm text-slate-600">Kop surat memakai data Profil Instansi. Nomor surat, tujuan, dan perihal mengikuti isian di atas.</p>
+                                </div>
+                                <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                    Isi Surat
+                                    <textarea wire:model="outgoingBody" rows="8" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-950"></textarea>
+                                    @error('outgoingBody') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                </label>
+                                <div class="grid gap-4 sm:grid-cols-2">
+                                    <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                        Nama Penandatangan
+                                        <input wire:model="signerName" type="text" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Nama pejabat">
+                                        @error('signerName') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                    </label>
+                                    <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                        Jabatan Penandatangan
+                                        <input wire:model="signerTitle" type="text" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Jabatan">
+                                        @error('signerTitle') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                    </label>
+                                </div>
+                            </div>
+                        @endif
                         <label class="grid gap-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm font-bold text-slate-600 sm:col-span-2">
-                            Dokumen Scan
+                            {{ $type === 'Keluar' && $outgoingInputMode === 'upload' ? 'Upload Surat Jadi' : 'File Surat Utama' }}
                             <input wire:model="document" type="file" accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
-                            <span class="text-xs font-normal text-slate-500">PDF, JPG, JPEG, atau PNG. Maksimal 5 MB.</span>
+                            <span class="text-xs font-normal text-slate-500">
+                                PDF, JPG, JPEG, atau PNG. Maksimal 5 MB. {{ $type === 'Keluar' && $outgoingInputMode === 'upload' ? 'Wajib untuk mode upload surat jadi.' : '' }}
+                            </span>
                             @error('document') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
+                        <div class="grid gap-4 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
+                            <div>
+                                <div class="font-bold text-slate-700">Dokumen Tambahan</div>
+                                <p class="text-sm text-slate-500">Bisa pilih lebih dari satu file untuk setiap kategori.</p>
+                            </div>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Lampiran
+                                <input wire:model="attachmentFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                @error('attachmentFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Nota Dinas
+                                <input wire:model="memoFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                @error('memoFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Dokumen Pendukung
+                                <input wire:model="supportingFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                @error('supportingFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                        </div>
                     </div>
 
                     <div class="mt-6 flex justify-end gap-2">
                         <button type="button" wire:click="$set('showLetterForm', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
-                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Simpan Surat</button>
+                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">{{ $editingLetterId ? 'Simpan Perubahan' : 'Simpan Surat' }}</button>
                     </div>
                 </form>
             </div>
@@ -632,11 +1651,13 @@ new class extends Component
                     <div class="mt-5 grid gap-4">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Penerima Disposisi
-                            <select wire:model="recipientName" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
-                                <option>Staf Administrasi</option>
-                                <option>Kepala Subbagian Umum</option>
-                                <option>Analis Kebijakan</option>
+                            <select wire:model="recipientId" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <option value="">Pilih penerima</option>
+                                @foreach ($dispositionRecipients as $recipient)
+                                    <option value="{{ $recipient->id }}">{{ $recipient->name }}{{ $recipient->position ? ' - '.$recipient->position : '' }}</option>
+                                @endforeach
                             </select>
+                            @error('recipientId') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Instruksi

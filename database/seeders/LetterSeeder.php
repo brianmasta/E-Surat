@@ -16,6 +16,7 @@ class LetterSeeder extends Seeder
             [
                 'type' => 'Masuk',
                 'unit_code' => 'SET-MRP',
+                'classification_code' => '000.1',
                 'number' => '045/UM/2026',
                 'subject' => 'Undangan rapat koordinasi persiapan layanan publik',
                 'external_party' => 'Sekretariat Daerah',
@@ -26,6 +27,7 @@ class LetterSeeder extends Seeder
             [
                 'type' => 'Masuk',
                 'unit_code' => 'MRP',
+                'classification_code' => '000.2',
                 'number' => '112/BPKAD/V/2026',
                 'subject' => 'Permintaan verifikasi data aset triwulan',
                 'external_party' => 'BPKAD Provinsi',
@@ -44,6 +46,7 @@ class LetterSeeder extends Seeder
             [
                 'type' => 'Keluar',
                 'unit_code' => 'SET-MRP',
+                'classification_code' => '800',
                 'number' => '800/017/SET-MRP/05/2026',
                 'subject' => 'Balasan permintaan data pegawai non ASN',
                 'external_party' => 'BKD Kabupaten',
@@ -54,6 +57,7 @@ class LetterSeeder extends Seeder
             [
                 'type' => 'Masuk',
                 'unit_code' => 'MRP',
+                'classification_code' => '000.5',
                 'number' => '021/DINKES/V/2026',
                 'subject' => 'Pemberitahuan jadwal sosialisasi aplikasi layanan',
                 'external_party' => 'Dinas Kesehatan',
@@ -72,6 +76,7 @@ class LetterSeeder extends Seeder
             [
                 'type' => 'Keluar',
                 'unit_code' => 'MRP',
+                'classification_code' => '000.1.2',
                 'number' => '800/018/MRP/05/2026',
                 'subject' => 'Surat tugas pendampingan arsip digital',
                 'external_party' => 'Kantor Distrik Jayapura Utara',
@@ -85,10 +90,13 @@ class LetterSeeder extends Seeder
             $dispositions = $data['dispositions'] ?? [];
             unset($data['dispositions']);
 
-            $letter = Letter::create($data);
+            $letter = Letter::updateOrCreate(
+                ['number' => $data['number']],
+                $data,
+            );
 
             foreach ($dispositions as $disposition) {
-                $letter->dispositions()->create($disposition);
+                $letter->dispositions()->firstOrCreate($disposition);
             }
         }
     }
