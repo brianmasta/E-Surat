@@ -98,6 +98,14 @@ new class extends Component
                 Masuk
             </button>
 
+            <div class="mt-5 text-center text-xs text-slate-500">
+                Powered by
+                <span class="font-semibold text-teal-700">
+                    Combrof Digital Solution
+                </span>
+                © {{ date('Y') }}
+            </div>
+
             <div class="mt-6 rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
                 <div class="font-bold text-slate-800">Akun demo</div>
                 <div class="mt-2 grid gap-1">
