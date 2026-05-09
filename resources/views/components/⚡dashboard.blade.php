@@ -942,7 +942,7 @@ new class extends Component
     <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
         <header class="sticky top-0 z-10 -mx-4 flex flex-col gap-4 border-b border-slate-200 bg-slate-100/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 xl:flex-row xl:items-start xl:justify-between">
             <div>
-                <p class="text-xs font-bold uppercase text-teal-700">Rabu, 6 Mei 2026</p>
+                <p class="text-xs font-bold uppercase text-teal-700">    {{ \Carbon\Carbon::now()->translatedFormat('l, j F Y') }}</p>
                 <h1 class="mt-1 text-3xl font-bold tracking-normal text-slate-950">Dasbor Persuratan {{ $agencyProfile['short_name'] }}</h1>
                 <p class="mt-2 max-w-2xl text-sm text-slate-600">Pengelolaan surat {{ $agencyProfile['name'] }}.</p>
             </div>
