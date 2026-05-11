@@ -7,9 +7,9 @@ use Livewire\Component;
 
 new class extends Component
 {
-    public string $email = 'admin@mrp-papuatengah.test';
+    // public string $email = 'admin@mrp-papuatengah.test';
 
-    public string $password = 'password';
+    // public string $password = 'password';
 
     public bool $remember = false;
 
@@ -75,17 +75,17 @@ new class extends Component
         <form wire:submit="login" class="p-6 sm:p-8">
             <p class="text-xs font-bold uppercase text-teal-700">Autentikasi</p>
             <h2 class="mt-1 text-2xl font-bold">Masuk Aplikasi</h2>
-            <p class="mt-2 text-sm text-slate-500">Gunakan akun sesuai role pengguna.</p>
+            <p class="mt-2 text-sm text-slate-500">Gunakan akun aktif.</p>
 
             <div class="mt-6 grid gap-4">
                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                     Email
-                    <input wire:model="email" type="email" autocomplete="email" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                    <input wire:model="email" type="email" autocomplete="email" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Email">
                     @error('email') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                 </label>
                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                     Password
-                    <input wire:model="password" type="password" autocomplete="current-password" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                    <input wire:model="password" type="password" autocomplete="current-password" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Password">
                     @error('password') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                 </label>
                 <label class="flex items-center gap-3 text-sm font-bold text-slate-600">
@@ -106,7 +106,7 @@ new class extends Component
                 © {{ date('Y') }}
             </div>
 
-            <div class="mt-6 rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
+            {{-- <div class="mt-6 rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
                 <div class="font-bold text-slate-800">Akun demo</div>
                 <div class="mt-2 grid gap-1">
                     <div>Admin: admin@mrp-papuatengah.test</div>
@@ -115,7 +115,7 @@ new class extends Component
                     <div>Staf: staf@mrp-papuatengah.test</div>
                     <div>Password semua akun: password</div>
                 </div>
-            </div>
+            </div> --}}
         </form>
     </section>
 </main>
