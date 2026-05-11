@@ -7,9 +7,9 @@ use Livewire\Component;
 
 new class extends Component
 {
-    // public string $email = 'admin@mrp-papuatengah.test';
+    public string $email;
 
-    // public string $password = 'password';
+    public string $password;
 
     public bool $remember = false;
 
