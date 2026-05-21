@@ -1837,9 +1837,15 @@ new class extends Component
                                 PDF, JPG, JPEG, atau PNG. Maksimal 5 MB. {{ $type === 'Keluar' && $outgoingInputMode === 'upload' ? 'Wajib untuk mode upload surat jadi.' : '' }}
                             </span>
                             @if ($editingLetter?->file_path)
-                                <span class="rounded-lg bg-white px-3 py-2 text-xs font-normal text-slate-600 ring-1 ring-slate-200">
-                                    File lama masih tersimpan: <span class="font-semibold">{{ basename($editingLetter->file_path) }}</span>. Upload file baru hanya jika ingin mengganti dokumen.
-                                </span>
+                                <div class="rounded-lg bg-white p-3 text-xs font-normal text-slate-600 ring-1 ring-slate-200">
+                                    <div class="font-bold text-slate-800">File lama masih tersimpan</div>
+                                    <div class="mt-1 break-all">{{ basename($editingLetter->file_path) }}</div>
+                                    <div class="mt-3 flex flex-wrap gap-2">
+                                        <a href="{{ route('letters.document.review', $editingLetter) }}" target="_blank" class="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:border-teal-600">Review</a>
+                                        <a href="{{ route('letters.document.download', $editingLetter) }}" class="rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-800">Download</a>
+                                    </div>
+                                    <div class="mt-2 text-slate-500">Upload file baru hanya jika ingin mengganti dokumen.</div>
+                                </div>
                             @endif
                             @error('document') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
