@@ -26,6 +26,11 @@ class Letter extends Model
         'nature',
         'urgency',
         'due_date',
+        'archive_location',
+        'archive_box',
+        'retention_category',
+        'retention_until',
+        'archive_notes',
         'file_path',
         'status',
     ];
@@ -34,6 +39,7 @@ class Letter extends Model
         'letter_date' => 'date',
         'received_date' => 'date',
         'due_date' => 'date',
+        'retention_until' => 'date',
     ];
 
     public function dispositions(): HasMany

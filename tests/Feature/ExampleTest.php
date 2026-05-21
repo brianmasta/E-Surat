@@ -352,14 +352,20 @@ class ExampleTest extends TestCase
             'next_sequence' => 6,
         ]);
 
+        $letterDates = [
+            1 => now()->subDays(10),
+            3 => now()->subDays(8),
+            5 => now()->subDays(6),
+        ];
+
         foreach ([1, 3, 5] as $sequence) {
             Letter::create([
                 'type' => 'Keluar',
                 'unit_code' => 'SET-MRP',
-                'number' => '800/'.str_pad((string) $sequence, 3, '0', STR_PAD_LEFT).'/SET-MRP/'.now()->format('m').'/'.now()->format('Y'),
+                'number' => '800/'.str_pad((string) $sequence, 3, '0', STR_PAD_LEFT).'/SET-MRP/'.$letterDates[$sequence]->format('m').'/'.$letterDates[$sequence]->format('Y'),
                 'subject' => 'Surat monitoring nomor '.$sequence,
                 'external_party' => 'Biro Umum',
-                'letter_date' => now()->toDateString(),
+                'letter_date' => $letterDates[$sequence]->toDateString(),
                 'status' => 'Selesai',
             ]);
         }
@@ -370,10 +376,49 @@ class ExampleTest extends TestCase
             ->set('numberMonitorYear', (int) now()->format('Y'))
             ->set('numberMonitorCheck', '4')
             ->assertSee('Monitoring Nomor Surat Keluar')
+            ->assertSee('Histori Tanggal Nomor Terpakai')
+            ->assertSee('Tanggal surat:')
+            ->assertSee('Rekomendasi tanggal lama')
+            ->assertSee($letterDates[3]->translatedFormat('d M Y'))
+            ->assertSee('Pakai')
             ->assertSee('002')
             ->assertSee('004')
             ->assertSee('Nomor 004')
             ->assertSee('masih kosong');
+    }
+
+    public function test_dashboard_shows_monitoring_number_button_for_admin(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        Livewire::test('dashboard')
+            ->assertSee('Monitoring Surat');
+
+        Livewire::withQueryParams(['tab' => 'monitoring-nomor'])
+            ->test('settings')
+            ->assertSet('activeSettingsTab', 'monitoring-nomor')
+            ->assertSee('Monitoring Nomor Surat Keluar');
+    }
+
+    public function test_available_number_recommendation_can_prefill_outgoing_letter_form(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        $oldDate = now()->subDays(8)->toDateString();
+        $number = '800/004/SET-MRP/'.now()->subDays(8)->format('m').'/'.now()->subDays(8)->format('Y');
+
+        Livewire::withQueryParams([
+            'create' => 'Keluar',
+            'unit' => 'SET-MRP',
+            'number' => $number,
+            'letter_date' => $oldDate,
+        ])
+            ->test('dashboard')
+            ->assertSet('showLetterForm', true)
+            ->assertSet('type', 'Keluar')
+            ->assertSet('unitCode', 'SET-MRP')
+            ->assertSet('number', $number)
+            ->assertSet('letterDate', $oldDate);
     }
 
     public function test_archive_classification_can_be_saved_on_letter(): void
@@ -637,6 +682,32 @@ class ExampleTest extends TestCase
         ]);
     }
 
+    public function test_letter_archive_location_and_retention_fields_are_saved(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        Livewire::test('dashboard')
+            ->call('openLetterForm', 'Masuk', 'SET-MRP')
+            ->set('subject', 'Surat dengan lokasi arsip fisik')
+            ->set('externalParty', 'Dinas Arsip')
+            ->set('receivedDate', now()->toDateString())
+            ->set('archiveLocation', 'Ruang Arsip Lantai 2')
+            ->set('archiveBox', 'Rak A-03 / Boks 12')
+            ->set('retentionCategory', 'Inaktif')
+            ->set('retentionUntil', now()->addYears(5)->toDateString())
+            ->set('archiveNotes', 'Dipindahkan ke arsip inaktif setelah audit selesai.')
+            ->call('saveLetter');
+
+        $this->assertDatabaseHas('letters', [
+            'subject' => 'Surat dengan lokasi arsip fisik',
+            'archive_location' => 'Ruang Arsip Lantai 2',
+            'archive_box' => 'Rak A-03 / Boks 12',
+            'retention_category' => 'Inaktif',
+            'retention_until' => now()->addYears(5)->startOfDay()->toDateTimeString(),
+            'archive_notes' => 'Dipindahkan ke arsip inaktif setelah audit selesai.',
+        ]);
+    }
+
     public function test_outgoing_letter_document_can_be_uploaded_after_saved(): void
     {
         Storage::fake('public');
@@ -739,6 +810,63 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('activity_logs', [
             'action' => 'letter.approval_completed',
             'subject_id' => $signature->id,
+        ]);
+    }
+
+    public function test_outgoing_letter_concept_can_be_rejected_and_resubmitted(): void
+    {
+        $admin = User::where('role', 'Admin Sekretariat')->firstOrFail();
+        $departmentHead = User::where('role', 'Kepala Bagian')->firstOrFail();
+
+        $letter = Letter::create([
+            'type' => 'Keluar',
+            'unit_code' => 'SET-MRP',
+            'number' => '800/778/SET-MRP/'.now()->format('m').'/'.now()->format('Y'),
+            'subject' => 'Konsep surat keluar perlu revisi',
+            'external_party' => 'Gubernur Papua Tengah',
+            'letter_date' => now()->toDateString(),
+            'status' => 'Selesai',
+        ]);
+
+        $this->actingAs($admin);
+
+        Livewire::test('dashboard')
+            ->call('startSignatureWorkflow', $letter->id);
+
+        $paraf = $letter->approvals()->where('step', 'Paraf Konsep')->firstOrFail();
+
+        $this->actingAs($departmentHead);
+
+        Livewire::test('dashboard')
+            ->call('openApprovalRevisionModal', $paraf->id)
+            ->assertSet('showRevisionModal', true)
+            ->set('revisionNote', 'Perbaiki tujuan surat dan dasar hukum.')
+            ->call('rejectApprovalStep');
+
+        $this->assertDatabaseHas('letter_approvals', [
+            'id' => $paraf->id,
+            'status' => 'Ditolak',
+            'note' => 'Perbaiki tujuan surat dan dasar hukum.',
+            'actor_name' => $departmentHead->name,
+        ]);
+        $this->assertDatabaseHas('letters', [
+            'id' => $letter->id,
+            'status' => 'Revisi Konsep',
+        ]);
+
+        $this->actingAs($admin);
+
+        Livewire::test('dashboard')
+            ->call('resubmitApprovalWorkflow', $letter->id);
+
+        $this->assertDatabaseHas('letter_approvals', [
+            'id' => $paraf->id,
+            'status' => 'Menunggu',
+            'note' => null,
+        ]);
+        $this->assertDatabaseHas('letters', [
+            'id' => $letter->id,
+            'status' => 'Menunggu Paraf',
         ]);
     }
 

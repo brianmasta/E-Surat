@@ -92,6 +92,11 @@ new class extends Component
         ]);
 
         $this->roles = AppSetting::getValue('roles', []);
+
+        $requestedTab = request('tab');
+        if (is_string($requestedTab) && array_key_exists($requestedTab, $this->settingsTabs())) {
+            $this->activeSettingsTab = $requestedTab;
+        }
     }
 
     public function settingsTabs(): array
@@ -596,9 +601,26 @@ new class extends Component
             ->reject(fn (int $sequence) => in_array($sequence, $usedSequences, true))
             ->values()
             ->all();
+        $missingItems = collect($missing)
+            ->take(40)
+            ->map(function (int $sequence) use ($used) {
+                $recommendation = $this->recommendedDateForSequence($sequence, $used);
+
+                return [
+                    'sequence' => $sequence,
+                    'recommended_date' => $recommendation['date'],
+                    'recommendation_note' => $recommendation['note'],
+                    'suggested_number' => $this->numberForSequence($sequence, $recommendation['date']),
+                ];
+            })
+            ->values()
+            ->all();
 
         $check = $this->numberMonitorCheck !== ''
             ? max(1, (int) $this->numberMonitorCheck)
+            : null;
+        $checkRecommendation = $check && ! in_array($check, $usedSequences, true)
+            ? $this->recommendedDateForSequence($check, $used)
             : null;
 
         return [
@@ -606,11 +628,72 @@ new class extends Component
             'missing_count' => count($missing),
             'next_sequence' => $nextSequence,
             'missing_sequences' => array_slice($missing, 0, 40),
+            'missing_items' => $missingItems,
             'missing_ranges' => $this->sequenceRanges($missing),
             'recent_used' => $used->reverse()->take(8)->values()->all(),
             'check_sequence' => $check,
             'check_is_available' => $check ? ! in_array($check, $usedSequences, true) : null,
+            'check_recommendation' => $checkRecommendation,
         ];
+    }
+
+    public function recommendedDateForSequence(int $sequence, \Illuminate\Support\Collection $used): array
+    {
+        $previous = $used
+            ->filter(fn (array $item) => $item['sequence'] < $sequence && $item['letter_date'])
+            ->sortByDesc('sequence')
+            ->first();
+        $next = $used
+            ->filter(fn (array $item) => $item['sequence'] > $sequence && $item['letter_date'])
+            ->sortBy('sequence')
+            ->first();
+
+        if ($previous && $next && $previous['letter_date']->isSameDay($next['letter_date'])) {
+            return [
+                'date' => $previous['letter_date'],
+                'note' => 'Mengikuti tanggal nomor '.str_pad((string) $previous['sequence'], 3, '0', STR_PAD_LEFT).' dan '.str_pad((string) $next['sequence'], 3, '0', STR_PAD_LEFT),
+            ];
+        }
+
+        if ($previous) {
+            return [
+                'date' => $previous['letter_date'],
+                'note' => 'Disarankan mengikuti tanggal nomor sebelumnya '.str_pad((string) $previous['sequence'], 3, '0', STR_PAD_LEFT),
+            ];
+        }
+
+        if ($next) {
+            return [
+                'date' => $next['letter_date'],
+                'note' => 'Disarankan mengikuti tanggal nomor berikutnya '.str_pad((string) $next['sequence'], 3, '0', STR_PAD_LEFT),
+            ];
+        }
+
+        return [
+            'date' => null,
+            'note' => 'Belum ada histori pembanding',
+        ];
+    }
+
+    public function numberForSequence(int $sequence, mixed $recommendedDate = null): string
+    {
+        $separator = (string) ($this->numbering['separator'] ?? '/');
+        $date = $recommendedDate ?: now()->setYear($this->numberMonitorYear);
+        $parts = [
+            $this->numbering['prefix'] ?? '800',
+            str_pad((string) $sequence, 3, '0', STR_PAD_LEFT),
+            $this->numberMonitorUnit,
+        ];
+
+        if ($this->numbering['include_month'] ?? true) {
+            $parts[] = $date->format('m');
+        }
+
+        if ($this->numbering['include_year'] ?? true) {
+            $parts[] = $date->format('Y');
+        }
+
+        return implode($separator, $parts);
     }
 
     public function extractSequenceFromNumber(?string $number): ?int
@@ -997,6 +1080,13 @@ new class extends Component
                                 @if ($numberMonitor['check_sequence'])
                                     Nomor {{ str_pad((string) $numberMonitor['check_sequence'], 3, '0', STR_PAD_LEFT) }}
                                     {{ $numberMonitor['check_is_available'] ? 'masih kosong' : 'sudah dipakai' }}
+                                    @if ($numberMonitor['check_is_available'] && $numberMonitor['check_recommendation'])
+                                        <div class="mt-2 rounded-lg bg-white/70 px-3 py-2 text-xs text-slate-700 ring-1 ring-black/5">
+                                            <span class="font-bold">Rekomendasi tanggal lama:</span>
+                                            {{ $numberMonitor['check_recommendation']['date']?->translatedFormat('d M Y') ?: '-' }}
+                                            <div class="mt-1 font-normal">{{ $numberMonitor['check_recommendation']['note'] }}</div>
+                                        </div>
+                                    @endif
                                 @else
                                     Masukkan nomor urut untuk dicek.
                                 @endif
@@ -1007,10 +1097,23 @@ new class extends Component
                     <div class="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
                         <div class="rounded-lg border border-slate-200 p-4">
                             <div class="font-bold">Nomor Kosong yang Bisa Dipakai</div>
-                            @if ($numberMonitor['missing_sequences'])
-                                <div class="mt-3 flex flex-wrap gap-2">
-                                    @foreach ($numberMonitor['missing_sequences'] as $sequence)
-                                        <span class="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800 ring-1 ring-amber-200">{{ str_pad((string) $sequence, 3, '0', STR_PAD_LEFT) }}</span>
+                            @if ($numberMonitor['missing_items'])
+                                <div class="mt-3 grid gap-2 md:grid-cols-2">
+                                    @foreach ($numberMonitor['missing_items'] as $item)
+                                        <div class="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                                            <div class="flex items-start justify-between gap-2">
+                                                <div>
+                                                    <div class="text-sm font-bold text-amber-900">{{ str_pad((string) $item['sequence'], 3, '0', STR_PAD_LEFT) }}</div>
+                                                    <div class="mt-1 text-xs font-semibold text-amber-800">Rekomendasi tanggal lama: {{ $item['recommended_date']?->translatedFormat('d M Y') ?: '-' }}</div>
+                                                    <div class="mt-1 text-xs text-amber-700">{{ $item['recommendation_note'] }}</div>
+                                                </div>
+                                                <a href="{{ route('dashboard', ['create' => 'Keluar', 'unit' => $numberMonitorUnit, 'number' => $item['suggested_number'], 'letter_date' => $item['recommended_date']?->toDateString()]) }}"
+                                                   class="shrink-0 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-800">
+                                                    Pakai
+                                                </a>
+                                            </div>
+                                            <div class="mt-2 break-all text-xs font-semibold text-slate-600">{{ $item['suggested_number'] }}</div>
+                                        </div>
                                     @endforeach
                                 </div>
                             @else
@@ -1032,11 +1135,12 @@ new class extends Component
                         </div>
 
                         <div class="rounded-lg border border-slate-200 p-4">
-                            <div class="font-bold">Nomor Terpakai Terakhir</div>
+                            <div class="font-bold">Histori Tanggal Nomor Terpakai</div>
                             <div class="mt-3 space-y-3">
                                 @forelse ($numberMonitor['recent_used'] as $item)
                                     <div class="border-l-4 border-teal-700 pl-3">
                                         <div class="text-sm font-bold">{{ str_pad((string) $item['sequence'], 3, '0', STR_PAD_LEFT) }} | {{ $item['number'] }}</div>
+                                        <div class="mt-1 text-xs font-semibold text-slate-500">Tanggal surat: {{ $item['letter_date']?->translatedFormat('d M Y') ?: '-' }}</div>
                                         <div class="mt-1 text-xs text-slate-500">{{ $item['subject'] }}</div>
                                     </div>
                                 @empty

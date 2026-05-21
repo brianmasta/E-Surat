@@ -78,6 +78,16 @@ new class extends Component
 
     public string $dueDate = '';
 
+    public string $archiveLocation = '';
+
+    public string $archiveBox = '';
+
+    public string $retentionCategory = 'Aktif';
+
+    public string $retentionUntil = '';
+
+    public string $archiveNotes = '';
+
     public $document = null;
 
     public $outgoingDocument = null;
@@ -92,6 +102,12 @@ new class extends Component
 
     public string $instruction = '';
 
+    public ?int $revisionApprovalId = null;
+
+    public string $revisionNote = '';
+
+    public bool $showRevisionModal = false;
+
     public function mount(): void
     {
         $unitCodes = $this->unitCodes();
@@ -103,6 +119,19 @@ new class extends Component
             ? request('unit')
             : 'Semua';
         $this->selectedLetterId = Letter::latest('letter_date')->value('id');
+
+        if (request('create') === 'Keluar' && $this->canManageLetters()) {
+            $requestedUnit = is_string(request('unit')) ? request('unit') : null;
+            $this->openLetterForm('Keluar', $requestedUnit);
+
+            if (is_string(request('number')) && trim(request('number')) !== '') {
+                $this->number = trim(request('number'));
+            }
+
+            if (is_string(request('letter_date')) && preg_match('/^\d{4}-\d{2}-\d{2}$/', request('letter_date'))) {
+                $this->letterDate = request('letter_date');
+            }
+        }
     }
 
     public function letters()
@@ -256,6 +285,11 @@ new class extends Component
         $this->nature = 'Biasa';
         $this->urgency = 'Normal';
         $this->dueDate = '';
+        $this->archiveLocation = '';
+        $this->archiveBox = '';
+        $this->retentionCategory = 'Aktif';
+        $this->retentionUntil = '';
+        $this->archiveNotes = '';
         $this->document = null;
         $this->attachmentFiles = [];
         $this->memoFiles = [];
@@ -287,6 +321,11 @@ new class extends Component
         $this->nature = $letter->nature;
         $this->urgency = $letter->urgency;
         $this->dueDate = $letter->due_date?->toDateString() ?? '';
+        $this->archiveLocation = $letter->archive_location ?? '';
+        $this->archiveBox = $letter->archive_box ?? '';
+        $this->retentionCategory = $letter->retention_category ?? 'Aktif';
+        $this->retentionUntil = $letter->retention_until?->toDateString() ?? '';
+        $this->archiveNotes = $letter->archive_notes ?? '';
         $this->document = null;
         $this->attachmentFiles = [];
         $this->memoFiles = [];
@@ -359,6 +398,11 @@ new class extends Component
             'nature' => ['required', 'in:Biasa,Penting,Rahasia,Sangat Rahasia'],
             'urgency' => ['required', 'in:Normal,Segera,Sangat Segera'],
             'dueDate' => ['nullable', 'date', 'after_or_equal:receivedDate'],
+            'archiveLocation' => ['nullable', 'string', 'max:255'],
+            'archiveBox' => ['nullable', 'string', 'max:100'],
+            'retentionCategory' => ['required', 'in:Aktif,Inaktif,Permanen,Siap Musnah,Dimusnahkan'],
+            'retentionUntil' => ['nullable', 'date'],
+            'archiveNotes' => ['nullable', 'string', 'max:1000'],
             'document' => ['nullable', Rule::requiredIf($this->type === 'Keluar' && $this->outgoingInputMode === 'upload' && ! $editingLetter?->file_path), 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
             'attachmentFiles.*' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
             'memoFiles.*' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
@@ -393,6 +437,11 @@ new class extends Component
             'nature' => $validated['nature'],
             'urgency' => $validated['urgency'],
             'due_date' => $validated['dueDate'] ?: null,
+            'archive_location' => $validated['archiveLocation'] ?: null,
+            'archive_box' => $validated['archiveBox'] ?: null,
+            'retention_category' => $validated['retentionCategory'],
+            'retention_until' => $validated['retentionUntil'] ?: null,
+            'archive_notes' => $validated['archiveNotes'] ?: null,
             'file_path' => $filePath,
             'status' => $editingLetter?->status ?? ($validated['type'] === 'Masuk' ? 'Baru' : 'Selesai'),
         ];
@@ -549,6 +598,88 @@ new class extends Component
         $this->dispatch('notify', message: $approval->step.' berhasil diproses.');
     }
 
+    public function openApprovalRevisionModal(int $approvalId): void
+    {
+        $approval = LetterApproval::with('letter.approvals')->findOrFail($approvalId);
+
+        abort_unless($this->canActOnApproval($approval), 403);
+
+        $this->resetValidation();
+        $this->revisionApprovalId = $approval->id;
+        $this->revisionNote = '';
+        $this->showRevisionModal = true;
+    }
+
+    public function rejectApprovalStep(): void
+    {
+        $approval = LetterApproval::with('letter.approvals')->findOrFail((int) $this->revisionApprovalId);
+
+        abort_unless($this->canActOnApproval($approval), 403);
+
+        $validated = $this->validate([
+            'revisionNote' => ['required', 'string', 'max:1000'],
+        ]);
+
+        $user = auth()->user();
+        $approval->update([
+            'status' => 'Ditolak',
+            'actor_name' => $user?->name,
+            'actor_role' => $user?->role,
+            'note' => $validated['revisionNote'],
+            'acted_at' => now(),
+        ]);
+
+        $approval->letter->update(['status' => 'Revisi Konsep']);
+
+        ActivityLog::record(
+            'letter.approval_rejected',
+            $approval->step.' meminta revisi untuk surat '.$approval->letter->number,
+            $approval,
+            ['letter_id' => $approval->letter_id],
+        );
+
+        $this->revisionApprovalId = null;
+        $this->revisionNote = '';
+        $this->showRevisionModal = false;
+        $this->dispatch('notify', message: 'Konsep surat dikembalikan untuk revisi.');
+    }
+
+    public function resubmitApprovalWorkflow(int $letterId): void
+    {
+        abort_unless($this->canManageLetters(), 403);
+
+        $letter = Letter::with('approvals')->findOrFail($letterId);
+        abort_unless($letter->type === 'Keluar', 403);
+
+        $rejectedApproval = $letter->approvals
+            ->where('status', 'Ditolak')
+            ->sortBy('sort_order')
+            ->first();
+
+        abort_unless($rejectedApproval !== null, 422);
+
+        $letter->approvals()
+            ->where('sort_order', '>=', $rejectedApproval->sort_order)
+            ->update([
+                'status' => 'Menunggu',
+                'actor_name' => null,
+                'actor_role' => null,
+                'note' => null,
+                'acted_at' => null,
+            ]);
+
+        $letter->update(['status' => $this->waitingStatusForApprovalStep($rejectedApproval->step)]);
+
+        ActivityLog::record(
+            'letter.approval_resubmitted',
+            'Konsep surat diajukan ulang: '.$letter->number,
+            $letter,
+            ['from_step' => $rejectedApproval->step],
+        );
+
+        $this->dispatch('notify', message: 'Konsep surat diajukan ulang ke alur paraf.');
+    }
+
     public function approvalSteps(): array
     {
         return [
@@ -604,6 +735,16 @@ new class extends Component
             'Persetujuan Pimpinan' => 'Menunggu Tanda Tangan',
             'Tanda Tangan Elektronik' => 'Selesai',
             default => $approval->letter->status,
+        };
+    }
+
+    public function waitingStatusForApprovalStep(string $step): string
+    {
+        return match ($step) {
+            'Paraf Konsep' => 'Menunggu Paraf',
+            'Persetujuan Pimpinan' => 'Menunggu Persetujuan',
+            'Tanda Tangan Elektronik' => 'Menunggu Tanda Tangan',
+            default => 'Menunggu Paraf',
         };
     }
 
@@ -818,6 +959,7 @@ new class extends Component
             'Diproses' => 'bg-indigo-100 text-indigo-700 ring-indigo-200',
             'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan' => 'bg-sky-100 text-sky-700 ring-sky-200',
             'Disetujui', 'Ditandatangani' => 'bg-emerald-100 text-emerald-700 ring-emerald-200',
+            'Revisi Konsep', 'Ditolak' => 'bg-rose-100 text-rose-700 ring-rose-200',
             'Menunggu' => 'bg-amber-100 text-amber-700 ring-amber-200',
             'Selesai' => 'bg-emerald-100 text-emerald-700 ring-emerald-200',
             default => 'bg-slate-100 text-slate-700 ring-slate-200',
@@ -956,6 +1098,10 @@ new class extends Component
                 </label>
                 @if ($this->canManageLetters())
                     @php($actionUnit = $unitFilter === 'Semua' ? $this->defaultUnitCode() : $unitFilter)
+                    <a href="{{ route('settings', ['tab' => 'monitoring-nomor']) }}"
+                       class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
+                        Monitoring Surat
+                    </a>
                     <button type="button"
                             wire:click="openLetterForm('Masuk', '{{ $actionUnit }}')"
                             class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
@@ -1043,7 +1189,7 @@ new class extends Component
                     <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
                         Status
                         <select wire:model.live="statusFilter" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
-                            @foreach (['Semua', 'Baru', 'Disposisi', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Selesai'] as $status)
+                            @foreach (['Semua', 'Baru', 'Disposisi', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Revisi Konsep', 'Selesai'] as $status)
                                 <option value="{{ $status }}">{{ $status }}</option>
                             @endforeach
                         </select>
@@ -1257,6 +1403,27 @@ new class extends Component
                                 <div class="text-xs font-bold uppercase text-slate-500">Perihal</div>
                                 <div class="font-semibold">{{ $selectedLetter->subject }}</div>
                             </div>
+                            <div class="sm:col-span-2">
+                                <div class="text-xs font-bold uppercase text-slate-500">Lokasi Arsip Fisik</div>
+                                <div class="font-semibold">{{ $selectedLetter->archive_location ?: 'Belum dicatat' }}</div>
+                                @if ($selectedLetter->archive_box)
+                                    <div class="mt-1 text-sm text-slate-500">Boks/Map/Rak: {{ $selectedLetter->archive_box }}</div>
+                                @endif
+                            </div>
+                            <div>
+                                <div class="text-xs font-bold uppercase text-slate-500">Retensi Arsip</div>
+                                <div class="font-semibold">{{ $selectedLetter->retention_category ?: 'Aktif' }}</div>
+                            </div>
+                            <div>
+                                <div class="text-xs font-bold uppercase text-slate-500">Batas Retensi</div>
+                                <div class="font-semibold">{{ $selectedLetter->retention_until?->translatedFormat('d M Y') ?: 'Belum ditentukan' }}</div>
+                            </div>
+                            @if ($selectedLetter->archive_notes)
+                                <div class="sm:col-span-2">
+                                    <div class="text-xs font-bold uppercase text-slate-500">Catatan Arsip</div>
+                                    <div class="font-semibold">{{ $selectedLetter->archive_notes }}</div>
+                                </div>
+                            @endif
                             @if ($selectedLetter->type === 'Keluar' && $selectedLetter->outgoing_body)
                                 <div class="sm:col-span-2">
                                     <div class="text-xs font-bold uppercase text-slate-500">Naskah Surat Keluar</div>
@@ -1291,10 +1458,16 @@ new class extends Component
                                         <h3 class="font-bold">Paraf dan Tanda Tangan Elektronik</h3>
                                         <p class="text-sm text-slate-500">Alur formal konsep surat keluar sebelum dokumen dinyatakan selesai.</p>
                                     </div>
-                                    @if ($selectedLetter->approvals->isEmpty() && $this->canManageLetters())
-                                        <button type="button" wire:click="startSignatureWorkflow({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                                            Mulai Alur
-                                        </button>
+                                    @if ($this->canManageLetters())
+                                        @if ($selectedLetter->approvals->isEmpty())
+                                            <button type="button" wire:click="startSignatureWorkflow({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
+                                                Mulai Alur
+                                            </button>
+                                        @elseif ($selectedLetter->approvals->contains('status', 'Ditolak'))
+                                            <button type="button" wire:click="resubmitApprovalWorkflow({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
+                                                Ajukan Ulang
+                                            </button>
+                                        @endif
                                     @endif
                                 </div>
 
@@ -1310,6 +1483,11 @@ new class extends Component
                                                             Oleh {{ $approval->actor_name }} | {{ $approval->acted_at?->translatedFormat('d M Y H:i') }}
                                                         </div>
                                                     @endif
+                                                    @if ($approval->note)
+                                                        <div class="mt-2 rounded-lg bg-white px-3 py-2 text-sm text-rose-700 ring-1 ring-rose-100">
+                                                            Catatan: {{ $approval->note }}
+                                                        </div>
+                                                    @endif
                                                 </div>
                                                 <div class="flex flex-wrap items-center gap-2">
                                                     <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($approval->status) }}">{{ $approval->status }}</span>
@@ -1322,6 +1500,9 @@ new class extends Component
                                                         })
                                                         <button type="button" wire:click="approveLetterStep({{ $approval->id }})" class="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800">
                                                             {{ $actionLabel }}
+                                                        </button>
+                                                        <button type="button" wire:click="openApprovalRevisionModal({{ $approval->id }})" class="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-sm font-bold text-rose-700 hover:bg-rose-50">
+                                                            Revisi / Tolak
                                                         </button>
                                                     @endif
                                                 </div>
@@ -1444,7 +1625,7 @@ new class extends Component
                         @if ($this->canUpdateStatus())
                             <div class="flex flex-col gap-2 border-t border-slate-200 pt-5 sm:flex-row sm:justify-end">
                                 <select wire:change="updateStatus({{ $selectedLetter->id }}, $event.target.value)" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
-                                    @foreach (['Baru', 'Disposisi', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Selesai'] as $status)
+                                    @foreach (['Baru', 'Disposisi', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Revisi Konsep', 'Selesai'] as $status)
                                         <option value="{{ $status }}" @selected($selectedLetter->status === $status)>{{ $status }}</option>
                                     @endforeach
                                 </select>
@@ -1573,6 +1754,43 @@ new class extends Component
                             <input wire:model="subject" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Ringkasan perihal surat">
                             @error('subject') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
+                        <div class="grid gap-4 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
+                            <div>
+                                <div class="font-bold text-slate-800">Arsip Fisik dan Retensi</div>
+                                <p class="text-sm text-slate-500">Catat tempat simpan dokumen asli dan masa simpan arsip.</p>
+                            </div>
+                            <div class="grid gap-4 sm:grid-cols-2">
+                                <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                    Lokasi Arsip Fisik
+                                    <input wire:model="archiveLocation" type="text" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Contoh: Ruang Arsip Lantai 2">
+                                    @error('archiveLocation') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                </label>
+                                <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                    Boks / Map / Rak
+                                    <input wire:model="archiveBox" type="text" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Contoh: Rak A-03 / Boks 12">
+                                    @error('archiveBox') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                </label>
+                                <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                    Kategori Retensi
+                                    <select wire:model="retentionCategory" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950">
+                                        @foreach (['Aktif', 'Inaktif', 'Permanen', 'Siap Musnah', 'Dimusnahkan'] as $retentionOption)
+                                            <option value="{{ $retentionOption }}">{{ $retentionOption }}</option>
+                                        @endforeach
+                                    </select>
+                                    @error('retentionCategory') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                </label>
+                                <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                    Batas Retensi
+                                    <input wire:model="retentionUntil" type="date" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950">
+                                    @error('retentionUntil') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                                </label>
+                            </div>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Catatan Arsip
+                                <textarea wire:model="archiveNotes" rows="3" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-950" placeholder="Catatan lokasi, kondisi fisik, atau jadwal pemindahan arsip."></textarea>
+                                @error('archiveNotes') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                        </div>
                         @if ($type === 'Keluar' && $outgoingInputMode === 'template')
                             <div class="grid gap-4 rounded-lg border border-teal-100 bg-teal-50 p-4 sm:col-span-2">
                                 <div>
@@ -1632,6 +1850,31 @@ new class extends Component
                     <div class="mt-6 flex justify-end gap-2">
                         <button type="button" wire:click="$set('showLetterForm', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
                         <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">{{ $editingLetterId ? 'Simpan Perubahan' : 'Simpan Surat' }}</button>
+                    </div>
+                </form>
+            </div>
+        @endif
+
+        @if ($showRevisionModal)
+            <div class="fixed inset-0 z-30 grid place-items-center bg-slate-950/50 p-4">
+                <form wire:submit="rejectApprovalStep" class="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-lg bg-white p-6 shadow-xl">
+                    <div class="flex items-start justify-between gap-4">
+                        <div>
+                            <p class="text-xs font-bold uppercase text-rose-700">Revisi Konsep Surat</p>
+                            <h2 class="mt-1 text-xl font-bold">Tolak / Kembalikan Konsep</h2>
+                        </div>
+                        <button type="button" wire:click="$set('showRevisionModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">Ã—</button>
+                    </div>
+
+                    <label class="mt-5 grid gap-1 text-sm font-bold text-slate-600">
+                        Catatan Revisi
+                        <textarea wire:model="revisionNote" rows="5" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan alasan penolakan atau bagian yang harus direvisi."></textarea>
+                        @error('revisionNote') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                    </label>
+
+                    <div class="mt-6 flex justify-end gap-2">
+                        <button type="button" wire:click="$set('showRevisionModal', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
+                        <button type="submit" class="min-h-11 rounded-lg bg-rose-700 px-4 text-sm font-bold text-white hover:bg-rose-800">Kembalikan untuk Revisi</button>
                     </div>
                 </form>
             </div>
