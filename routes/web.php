@@ -170,6 +170,65 @@ Route::get('/letters/export/csv', function () {
     ]);
 })->middleware('auth')->name('letters.export');
 
+Route::get('/archive-classifications/import-template', function () {
+    abort_unless(auth()->user()?->isAdmin(), 403);
+
+    ActivityLog::record('classification.template_downloaded', 'Template import kode klasifikasi arsip didownload.');
+
+    $path = tempnam(sys_get_temp_dir(), 'template-kode-arsip-');
+    $zip = new \ZipArchive();
+    $zip->open($path, \ZipArchive::OVERWRITE);
+
+    $rows = [
+        ['kode', 'nama', 'kode_induk', 'deskripsi'],
+        ['000', 'Umum', '', 'Kelompok arsip umum'],
+        ['000.1', 'Ketatausahaan dan Kerumahtanggaan', '000', 'Turunan dari kode 000'],
+        ['000.1.2', 'Perjalanan Dinas Dalam Negeri', '000.1', 'Contoh kode klasifikasi arsip'],
+    ];
+    $columns = ['A', 'B', 'C', 'D'];
+    $sheetRows = '';
+
+    foreach ($rows as $rowIndex => $row) {
+        $number = $rowIndex + 1;
+        $sheetRows .= '<row r="'.$number.'">';
+        foreach ($row as $columnIndex => $value) {
+            $cell = $columns[$columnIndex].$number;
+            $sheetRows .= '<c r="'.$cell.'" t="inlineStr"><is><t>'.htmlspecialchars($value, ENT_XML1).'</t></is></c>';
+        }
+        $sheetRows .= '</row>';
+    }
+
+    $zip->addFromString('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>');
+    $zip->addFromString('_rels/.rels', '<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>');
+    $zip->addFromString('xl/workbook.xml', '<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets><sheet name="Kode Arsip" sheetId="1" r:id="rId1"/></sheets>
+</workbook>');
+    $zip->addFromString('xl/_rels/workbook.xml.rels', '<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>');
+    $zip->addFromString('xl/worksheets/sheet1.xml', '<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="42" customWidth="1"/><col min="3" max="3" width="18" customWidth="1"/><col min="4" max="4" width="44" customWidth="1"/></cols>
+<sheetData>'.$sheetRows.'</sheetData>
+</worksheet>');
+    $zip->close();
+
+    return response()->download($path, 'template-import-kode-arsip.xlsx', [
+        'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ])->deleteFileAfterSend(true);
+})->middleware('auth')->name('archive-classifications.import-template');
+
 Route::get('/settings', function () {
     abort_unless(auth()->user()?->isAdmin(), 403);
 

@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\AppSetting;
 use App\Models\ActivityLog;
+use App\Models\ArchiveClassification;
 use App\Models\DispositionRecipient;
 use App\Models\Letter;
 use App\Models\LetterAttachment;
@@ -276,6 +277,213 @@ class ExampleTest extends TestCase
             ->call('openLetterForm', 'Keluar')
             ->assertSet('unitCode', 'BAG UMUM')
             ->assertSet('number', '800/019/BAG UMUM/'.now()->format('m').'/'.now()->format('Y'));
+    }
+
+    public function test_archive_classification_codes_can_be_managed_in_settings(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        Livewire::test('settings')
+            ->call('setSettingsTab', 'kode-arsip')
+            ->assertSee('Kode Klasifikasi Arsip')
+            ->set('classificationCode', '990.1')
+            ->set('classificationName', 'Urusan Khusus Pengujian')
+            ->set('classificationParentCode', '990')
+            ->set('classificationDescription', 'Kode arsip untuk pengujian.')
+            ->call('saveClassification')
+            ->assertHasNoErrors();
+
+        $classification = ArchiveClassification::where('code', '990.1')->firstOrFail();
+
+        $this->assertDatabaseHas('archive_classifications', [
+            'code' => '990.1',
+            'name' => 'Urusan Khusus Pengujian',
+            'parent_code' => '990',
+        ]);
+
+        Livewire::test('settings')
+            ->call('setSettingsTab', 'kode-arsip')
+            ->call('editClassification', $classification->id)
+            ->assertSet('classificationCode', '990.1')
+            ->set('classificationName', 'Urusan Khusus Setelah Edit')
+            ->call('saveClassification')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseHas('archive_classifications', [
+            'code' => '990.1',
+            'name' => 'Urusan Khusus Setelah Edit',
+        ]);
+
+        Livewire::test('settings')
+            ->call('setSettingsTab', 'kode-arsip')
+            ->call('deleteClassification', $classification->id);
+
+        $this->assertDatabaseMissing('archive_classifications', [
+            'code' => '990.1',
+        ]);
+    }
+
+    public function test_archive_classification_codes_can_be_imported_from_csv(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        ArchiveClassification::create([
+            'code' => '991',
+            'name' => 'Kode Arsip Lama',
+            'description' => 'Data lama tidak boleh tertimpa.',
+        ]);
+
+        $csv = "kode,nama,kode_induk,deskripsi\n991,Import Kode Arsip,,Induk import\n991.1,Import Sub Kode,991,Turunan import\n991.1,Import Sub Kode Duplikat,991,Duplikat dalam file\n991.2,Import Sub Kode Kedua,991,Turunan kedua\n";
+
+        $component = Livewire::test('settings')
+            ->call('setSettingsTab', 'kode-arsip')
+            ->set('classificationImport', UploadedFile::fake()->createWithContent('kode-arsip.csv', $csv))
+            ->call('previewClassificationImport')
+            ->assertHasNoErrors()
+            ->assertSee('Preview Data Import')
+            ->assertSee('Duplikat')
+            ->assertSeeHtml('bg-rose-50')
+            ->assertSee('Kode sudah ada di database')
+            ->assertSee('Duplikat di file import');
+
+        $this->assertDatabaseMissing('archive_classifications', [
+            'code' => '991.1',
+        ]);
+
+        $component->call('confirmClassificationImport');
+
+        $this->assertDatabaseHas('archive_classifications', [
+            'code' => '991',
+            'name' => 'Kode Arsip Lama',
+            'description' => 'Data lama tidak boleh tertimpa.',
+        ]);
+        $this->assertDatabaseHas('archive_classifications', [
+            'code' => '991.1',
+            'name' => 'Import Sub Kode',
+            'parent_code' => '991',
+        ]);
+        $this->assertDatabaseHas('archive_classifications', [
+            'code' => '991.2',
+            'name' => 'Import Sub Kode Kedua',
+            'parent_code' => '991',
+        ]);
+        $this->assertSame(1, ArchiveClassification::where('code', '991.1')->count());
+        $this->assertDatabaseHas('activity_logs', [
+            'action' => 'classification.imported',
+        ]);
+        $this->assertStringContainsString('2 data duplikat dilewati', ActivityLog::where('action', 'classification.imported')->latest()->value('description'));
+    }
+
+    public function test_archive_classification_table_is_paginated(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        for ($i = 1; $i <= 12; $i++) {
+            ArchiveClassification::create([
+                'code' => '993.'.str_pad((string) $i, 2, '0', STR_PAD_LEFT),
+                'name' => 'Kode paginasi arsip '.$i,
+            ]);
+        }
+
+        Livewire::test('settings')
+            ->call('setSettingsTab', 'kode-arsip')
+            ->assertSee('Menampilkan 1-10 dari')
+            ->assertSee('Per halaman')
+            ->set('classificationPerPage', 25)
+            ->assertSee('Menampilkan 1-25 dari');
+    }
+
+    public function test_archive_classification_table_can_be_searched_and_filtered(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        ArchiveClassification::create([
+            'code' => '994',
+            'name' => 'Filter Induk Pengujian',
+        ]);
+        ArchiveClassification::create([
+            'code' => '994.1',
+            'name' => 'Filter Dipakai Pengujian',
+            'parent_code' => '994',
+        ]);
+        ArchiveClassification::create([
+            'code' => '994.2',
+            'name' => 'Filter Belum Dipakai Pengujian',
+            'parent_code' => '994',
+        ]);
+        Letter::create([
+            'type' => 'Masuk',
+            'unit_code' => 'SET-MRP',
+            'classification_code' => '994.1',
+            'agenda_number' => 'AG/FILTER-KODE/'.now()->format('Y').'/0001',
+            'number' => 'SM/FILTER-KODE/001',
+            'subject' => 'Surat pemakai kode arsip',
+            'external_party' => 'Biro Umum',
+            'letter_date' => now()->toDateString(),
+            'received_date' => now()->toDateString(),
+            'status' => 'Baru',
+        ]);
+
+        Livewire::test('settings')
+            ->call('setSettingsTab', 'kode-arsip')
+            ->set('classificationSearch', 'Filter Dipakai')
+            ->assertSee('994.1')
+            ->assertDontSee('994.2')
+            ->set('classificationSearch', '994')
+            ->set('classificationUsageFilter', 'Dipakai')
+            ->assertSee('994.1')
+            ->assertDontSee('994.2')
+            ->set('classificationUsageFilter', 'Belum Dipakai')
+            ->assertSee('994.2')
+            ->assertDontSee('994.1')
+            ->set('classificationParentFilter', 'Induk Utama')
+            ->assertSee('Filter Induk Pengujian')
+            ->call('resetClassificationFilters')
+            ->assertSet('classificationSearch', '')
+            ->assertSet('classificationParentFilter', 'Semua')
+            ->assertSet('classificationUsageFilter', 'Semua');
+    }
+
+    public function test_archive_classification_import_preview_is_paginated(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        $csv = "kode,nama,kode_induk,deskripsi\n";
+        for ($i = 1; $i <= 12; $i++) {
+            $number = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+            $csv .= '996.'.$number.',Preview Baris '.$number.',996,Data preview '.$number."\n";
+        }
+
+        Livewire::test('settings')
+            ->call('setSettingsTab', 'kode-arsip')
+            ->set('classificationImport', UploadedFile::fake()->createWithContent('preview-kode-arsip.csv', $csv))
+            ->call('previewClassificationImport')
+            ->assertSee('Menampilkan 1-10 dari 12 data preview')
+            ->assertSee('Preview Baris 01')
+            ->assertDontSee('Preview Baris 12')
+            ->call('setClassificationPreviewPage', 2)
+            ->assertSee('Halaman 2 dari 2')
+            ->assertSee('Preview Baris 12')
+            ->assertDontSee('Preview Baris 01');
+    }
+
+    public function test_archive_classification_import_template_can_be_downloaded(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        Livewire::test('settings')
+            ->call('setSettingsTab', 'kode-arsip')
+            ->assertSee('Download Template');
+
+        $response = $this->get(route('archive-classifications.import-template'));
+        $response
+            ->assertOk()
+            ->assertDownload('template-import-kode-arsip.xlsx')
+            ->assertHeader('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+        $this->assertDatabaseHas('activity_logs', [
+            'action' => 'classification.template_downloaded',
+        ]);
     }
 
     public function test_used_letter_unit_code_cannot_be_changed_or_deleted(): void

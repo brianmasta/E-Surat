@@ -2,6 +2,7 @@
 
 use App\Models\AppSetting;
 use App\Models\ActivityLog;
+use App\Models\ArchiveClassification;
 use App\Models\DispositionRecipient;
 use App\Models\Letter;
 use App\Models\User;
@@ -9,9 +10,14 @@ use App\Support\TaskInbox;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
 use Livewire\Component;
+use Livewire\WithFileUploads;
+use Livewire\WithPagination;
 
 new class extends Component
 {
+    use WithFileUploads;
+    use WithPagination;
+
     public array $agency = [];
 
     public array $numbering = [];
@@ -66,6 +72,34 @@ new class extends Component
 
     public bool $unitIsDefault = false;
 
+    public ?int $editingClassificationId = null;
+
+    public string $classificationCode = '';
+
+    public string $classificationName = '';
+
+    public string $classificationParentCode = '';
+
+    public string $classificationDescription = '';
+
+    public $classificationImport = null;
+
+    public array $classificationImportPreview = [];
+
+    public string $classificationImportFileName = '';
+
+    public int $classificationPreviewPage = 1;
+
+    public int $classificationPreviewPerPage = 10;
+
+    public int $classificationPerPage = 10;
+
+    public string $classificationSearch = '';
+
+    public string $classificationParentFilter = 'Semua';
+
+    public string $classificationUsageFilter = 'Semua';
+
     public function mount(): void
     {
         $this->numberMonitorYear = (int) now()->format('Y');
@@ -105,6 +139,7 @@ new class extends Component
             'profil' => 'Profil Instansi',
             'nomor' => 'Nomor & Alur',
             'unit' => 'Unit Surat',
+            'kode-arsip' => 'Kode Arsip',
             'monitoring-nomor' => 'Monitoring Nomor',
             'pengguna' => 'Pengguna',
             'disposisi' => 'Disposisi',
@@ -118,7 +153,36 @@ new class extends Component
             return;
         }
 
+        if ($this->activeSettingsTab !== $tab) {
+            $this->resetPage('classificationPage');
+        }
+
         $this->activeSettingsTab = $tab;
+    }
+
+    public function updatedClassificationPerPage(): void
+    {
+        $this->resetPage('classificationPage');
+    }
+
+    public function updatedClassificationSearch(): void
+    {
+        $this->resetPage('classificationPage');
+    }
+
+    public function updatedClassificationParentFilter(): void
+    {
+        $this->resetPage('classificationPage');
+    }
+
+    public function updatedClassificationUsageFilter(): void
+    {
+        $this->resetPage('classificationPage');
+    }
+
+    public function updatedClassificationPreviewPerPage(): void
+    {
+        $this->classificationPreviewPage = 1;
     }
 
     public function saveAgency(): void
@@ -308,6 +372,396 @@ new class extends Component
         $this->unitName = '';
         $this->unitDescription = '';
         $this->unitIsDefault = false;
+    }
+
+    public function archiveClassifications()
+    {
+        $search = trim($this->classificationSearch);
+
+        return ArchiveClassification::query()
+            ->withCount('letters')
+            ->when($search !== '', function ($query) use ($search) {
+                $query->where(function ($query) use ($search) {
+                    $query
+                        ->where('code', 'like', '%'.$search.'%')
+                        ->orWhere('name', 'like', '%'.$search.'%')
+                        ->orWhere('parent_code', 'like', '%'.$search.'%')
+                        ->orWhere('description', 'like', '%'.$search.'%');
+                });
+            })
+            ->when($this->classificationParentFilter === 'Induk Utama', fn ($query) => $query->whereNull('parent_code'))
+            ->when($this->classificationParentFilter === 'Turunan', fn ($query) => $query->whereNotNull('parent_code'))
+            ->when($this->classificationUsageFilter === 'Dipakai', fn ($query) => $query->has('letters'))
+            ->when($this->classificationUsageFilter === 'Belum Dipakai', fn ($query) => $query->doesntHave('letters'))
+            ->orderBy('code')
+            ->paginate($this->classificationPerPage, ['*'], 'classificationPage');
+    }
+
+    public function resetClassificationFilters(): void
+    {
+        $this->classificationSearch = '';
+        $this->classificationParentFilter = 'Semua';
+        $this->classificationUsageFilter = 'Semua';
+        $this->resetPage('classificationPage');
+    }
+
+    public function saveClassification(): void
+    {
+        $this->classificationCode = strtoupper(trim($this->classificationCode));
+        $this->classificationParentCode = strtoupper(trim($this->classificationParentCode));
+
+        $validated = $this->validate([
+            'classificationCode' => ['required', 'string', 'max:40', Rule::unique('archive_classifications', 'code')->ignore($this->editingClassificationId)],
+            'classificationName' => ['required', 'string', 'max:255'],
+            'classificationParentCode' => ['nullable', 'string', 'max:40', 'different:classificationCode'],
+            'classificationDescription' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $classification = $this->editingClassificationId
+            ? ArchiveClassification::findOrFail($this->editingClassificationId)
+            : new ArchiveClassification();
+
+        if ($this->editingClassificationId && $classification->code !== $validated['classificationCode'] && Letter::where('classification_code', $classification->code)->exists()) {
+            $this->addError('classificationCode', 'Kode arsip sudah dipakai surat sehingga tidak bisa diganti.');
+
+            return;
+        }
+
+        $classification->fill([
+            'code' => $validated['classificationCode'],
+            'name' => $validated['classificationName'],
+            'parent_code' => $validated['classificationParentCode'] ?: null,
+            'description' => $validated['classificationDescription'] ?: null,
+        ])->save();
+
+        ActivityLog::record(
+            $this->editingClassificationId ? 'classification.updated' : 'classification.created',
+            ($this->editingClassificationId ? 'Kode arsip diperbarui: ' : 'Kode arsip ditambahkan: ').$classification->code,
+            $classification,
+        );
+
+        $this->resetClassificationForm();
+        $this->resetPage('classificationPage');
+        $this->dispatch('notify', message: 'Kode klasifikasi arsip berhasil disimpan.');
+    }
+
+    public function editClassification(int $classificationId): void
+    {
+        $classification = ArchiveClassification::findOrFail($classificationId);
+
+        $this->editingClassificationId = $classification->id;
+        $this->classificationCode = $classification->code;
+        $this->classificationName = $classification->name;
+        $this->classificationParentCode = $classification->parent_code ?? '';
+        $this->classificationDescription = $classification->description ?? '';
+    }
+
+    public function deleteClassification(int $classificationId): void
+    {
+        $classification = ArchiveClassification::withCount('letters')->findOrFail($classificationId);
+
+        if ($classification->letters_count > 0) {
+            $this->dispatch('notify', message: 'Kode arsip tidak bisa dihapus karena sudah dipakai surat.');
+
+            return;
+        }
+
+        if (ArchiveClassification::where('parent_code', $classification->code)->exists()) {
+            $this->dispatch('notify', message: 'Kode arsip tidak bisa dihapus karena masih memiliki turunan.');
+
+            return;
+        }
+
+        $code = $classification->code;
+        $classification->delete();
+
+        if ($this->editingClassificationId === $classificationId) {
+            $this->resetClassificationForm();
+        }
+
+        ActivityLog::record('classification.deleted', 'Kode arsip dihapus: '.$code);
+        $this->resetPage('classificationPage');
+        $this->dispatch('notify', message: 'Kode klasifikasi arsip berhasil dihapus.');
+    }
+
+    public function importClassifications(): void
+    {
+        $this->previewClassificationImport();
+    }
+
+    public function previewClassificationImport(): void
+    {
+        $this->validate([
+            'classificationImport' => ['required', 'file', 'max:10240'],
+        ]);
+
+        $extension = strtolower($this->classificationImport->getClientOriginalExtension());
+        if (! in_array($extension, ['xlsx', 'csv', 'txt'], true)) {
+            $this->addError('classificationImport', 'Gunakan file Excel .xlsx atau CSV.');
+
+            return;
+        }
+
+        $rows = $extension === 'xlsx'
+            ? $this->rowsFromXlsx($this->classificationImport->getRealPath())
+            : $this->rowsFromCsv($this->classificationImport->getRealPath());
+
+        $this->classificationImportPreview = $this->classificationPreviewRows($rows);
+        $this->classificationImportFileName = $this->classificationImport->getClientOriginalName();
+        $this->classificationPreviewPage = 1;
+        $this->classificationImport = null;
+
+        $valid = collect($this->classificationImportPreview)->where('status', 'valid')->count();
+        $duplicate = collect($this->classificationImportPreview)->where('status', 'duplicate')->count();
+        $this->dispatch('notify', message: 'Preview import siap direview. '.$valid.' data valid, '.$duplicate.' data duplikat.');
+    }
+
+    public function confirmClassificationImport(): void
+    {
+        $result = $this->storeClassificationPreview($this->classificationImportPreview);
+
+        $this->classificationImportPreview = [];
+        $this->classificationImportFileName = '';
+        $this->classificationPreviewPage = 1;
+        $this->resetPage('classificationPage');
+
+        ActivityLog::record('classification.imported', $result['imported'].' kode arsip diimport dari Excel/CSV. '.$result['skipped'].' data duplikat dilewati.');
+        $this->dispatch('notify', message: $result['imported'].' kode klasifikasi arsip berhasil disimpan. '.$result['skipped'].' data duplikat dilewati.');
+    }
+
+    public function cancelClassificationImport(): void
+    {
+        $this->classificationImportPreview = [];
+        $this->classificationImportFileName = '';
+        $this->classificationPreviewPage = 1;
+        $this->classificationImport = null;
+    }
+
+    public function classificationPreviewRowsForPage(): array
+    {
+        return array_slice(
+            $this->classificationImportPreview,
+            ($this->classificationPreviewPage - 1) * $this->classificationPreviewPerPage,
+            $this->classificationPreviewPerPage,
+        );
+    }
+
+    public function classificationPreviewTotalPages(): int
+    {
+        return max(1, (int) ceil(count($this->classificationImportPreview) / $this->classificationPreviewPerPage));
+    }
+
+    public function setClassificationPreviewPage(int $page): void
+    {
+        $this->classificationPreviewPage = min(max(1, $page), $this->classificationPreviewTotalPages());
+    }
+
+    public function storeClassificationRows(array $rows): array
+    {
+        return $this->storeClassificationPreview($this->classificationPreviewRows($rows));
+    }
+
+    public function classificationPreviewRows(array $rows): array
+    {
+        $rows = collect($rows)
+            ->map(fn (array $row) => array_values(array_map(fn ($value) => trim((string) $value), $row)))
+            ->filter(fn (array $row) => collect($row)->filter()->isNotEmpty())
+            ->values();
+
+        if ($rows->isEmpty()) {
+            return [];
+        }
+
+        $firstRow = $rows->first();
+        $headers = collect($firstRow)->map(fn (string $value) => strtolower(str_replace([' ', '-', '.'], '_', $value)))->all();
+        $hasHeader = collect($headers)->contains(fn (string $header) => in_array($header, ['kode', 'code', 'kode_arsip', 'kode_klasifikasi', 'classification_code'], true));
+        $dataRows = $hasHeader ? $rows->slice(1)->values() : $rows;
+
+        $codeIndex = $hasHeader ? $this->headerIndex($headers, ['kode', 'code', 'kode_arsip', 'kode_klasifikasi', 'classification_code']) : 0;
+        $nameIndex = $hasHeader ? $this->headerIndex($headers, ['nama', 'name', 'nama_arsip', 'uraian', 'klasifikasi', 'classification_name']) : 1;
+        $parentIndex = $hasHeader ? $this->headerIndex($headers, ['parent', 'parent_code', 'kode_induk', 'induk']) : 2;
+        $descriptionIndex = $hasHeader ? $this->headerIndex($headers, ['deskripsi', 'description', 'keterangan']) : 3;
+
+        $existingCodes = ArchiveClassification::query()
+            ->pluck('code')
+            ->map(fn (string $code) => strtoupper(trim($code)))
+            ->all();
+        $seenCodes = [];
+        $preview = [];
+
+        foreach ($dataRows as $row) {
+            $code = strtoupper(trim((string) ($row[$codeIndex] ?? '')));
+            $name = trim((string) ($row[$nameIndex] ?? ''));
+            $parentCode = strtoupper(trim((string) ($row[$parentIndex] ?? '')));
+            $description = trim((string) ($row[$descriptionIndex] ?? ''));
+            $status = 'valid';
+            $reason = 'Siap disimpan';
+
+            if ($code === '' || $name === '') {
+                $status = 'duplicate';
+                $reason = 'Kode atau nama kosong';
+            } elseif (in_array($code, $existingCodes, true)) {
+                $status = 'duplicate';
+                $reason = 'Kode sudah ada di database';
+            } elseif (in_array($code, $seenCodes, true)) {
+                $status = 'duplicate';
+                $reason = 'Duplikat di file import';
+            } else {
+                $seenCodes[] = $code;
+            }
+
+            $preview[] = [
+                'code' => $code,
+                'name' => $name,
+                'parent_code' => $parentCode,
+                'description' => $description,
+                'status' => $status,
+                'reason' => $reason,
+            ];
+        }
+
+        return $preview;
+    }
+
+    public function storeClassificationPreview(array $preview): array
+    {
+        $imported = 0;
+        $skipped = 0;
+
+        foreach ($preview as $item) {
+            if (($item['status'] ?? '') !== 'valid') {
+                $skipped++;
+
+                continue;
+            }
+
+            ArchiveClassification::create([
+                'code' => $item['code'],
+                'name' => $item['name'],
+                'parent_code' => ($item['parent_code'] ?? '') ?: null,
+                'description' => ($item['description'] ?? '') ?: null,
+            ]);
+            $imported++;
+        }
+
+        return ['imported' => $imported, 'skipped' => $skipped];
+    }
+
+    public function headerIndex(array $headers, array $candidates): int
+    {
+        foreach ($candidates as $candidate) {
+            $index = array_search($candidate, $headers, true);
+            if ($index !== false) {
+                return (int) $index;
+            }
+        }
+
+        return 0;
+    }
+
+    public function rowsFromCsv(string $path): array
+    {
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        if ($lines === []) {
+            return [];
+        }
+
+        $delimiter = substr_count($lines[0], ';') > substr_count($lines[0], ',') ? ';' : ',';
+
+        return collect($lines)
+            ->map(fn (string $line) => str_getcsv($line, $delimiter))
+            ->all();
+    }
+
+    public function rowsFromXlsx(string $path): array
+    {
+        $zip = new \ZipArchive();
+        if ($zip->open($path) !== true) {
+            return [];
+        }
+
+        $sharedStrings = $this->xlsxSharedStrings($zip);
+        $sheetXml = $zip->getFromName('xl/worksheets/sheet1.xml') ?: '';
+        $zip->close();
+
+        if ($sheetXml === '') {
+            return [];
+        }
+
+        $sheet = simplexml_load_string($sheetXml);
+        if (! $sheet) {
+            return [];
+        }
+
+        $rows = [];
+        foreach ($sheet->sheetData->row as $row) {
+            $values = [];
+            foreach ($row->c as $cell) {
+                $reference = (string) $cell['r'];
+                $column = preg_replace('/\d+/', '', $reference);
+                $index = $this->excelColumnIndex((string) $column);
+                $type = (string) $cell['t'];
+                $value = (string) ($cell->v ?? '');
+
+                if ($type === 's') {
+                    $value = $sharedStrings[(int) $value] ?? '';
+                } elseif ($type === 'inlineStr') {
+                    $value = (string) ($cell->is->t ?? '');
+                }
+
+                $values[$index] = $value;
+            }
+
+            if ($values !== []) {
+                ksort($values);
+                $rows[] = array_values($values);
+            }
+        }
+
+        return $rows;
+    }
+
+    public function xlsxSharedStrings(\ZipArchive $zip): array
+    {
+        $xml = $zip->getFromName('xl/sharedStrings.xml') ?: '';
+        if ($xml === '') {
+            return [];
+        }
+
+        $shared = simplexml_load_string($xml);
+        if (! $shared) {
+            return [];
+        }
+
+        $strings = [];
+        foreach ($shared->si as $item) {
+            $textParts = [];
+            foreach ($item->xpath('.//*[local-name()="t"]') ?: [] as $text) {
+                $textParts[] = (string) $text;
+            }
+            $strings[] = implode('', $textParts);
+        }
+
+        return $strings;
+    }
+
+    public function excelColumnIndex(string $column): int
+    {
+        $index = 0;
+        foreach (str_split($column) as $letter) {
+            $index = $index * 26 + (ord(strtoupper($letter)) - 64);
+        }
+
+        return max(0, $index - 1);
+    }
+
+    public function resetClassificationForm(): void
+    {
+        $this->editingClassificationId = null;
+        $this->classificationCode = '';
+        $this->classificationName = '';
+        $this->classificationParentCode = '';
+        $this->classificationDescription = '';
     }
 
     public function addRole(): void
@@ -753,6 +1207,7 @@ new class extends Component
         $dispositionRecipients = $this->dispositionRecipients();
         $users = $this->users();
         $userRoles = $this->userRoles();
+        $archiveClassifications = $this->archiveClassifications();
         $activityLogs = $this->recentActivityLogs();
         $settingsTabs = $this->settingsTabs();
         $numberMonitor = $this->numberMonitor();
@@ -1034,6 +1489,239 @@ new class extends Component
                                 @endforelse
                             </tbody>
                         </table>
+                    </div>
+                </section>
+                @endif
+
+                @if ($activeSettingsTab === 'kode-arsip')
+                <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="flex flex-col gap-4 border-b border-slate-200 pb-4 lg:flex-row lg:items-start lg:justify-between">
+                        <div>
+                            <h2 class="text-lg font-bold">Kode Klasifikasi Arsip</h2>
+                            <p class="text-sm text-slate-500">Kelola kode klasifikasi arsip Permendagri 83/2022 yang dipakai pada surat masuk dan keluar.</p>
+                        </div>
+                        <form wire:submit="previewClassificationImport" class="grid gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-3 text-sm lg:w-[360px]">
+                            <label class="grid gap-1 font-bold text-slate-600">
+                                Import Excel / CSV
+                                <input wire:model="classificationImport" type="file" accept=".xlsx,.csv,.txt" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                <span class="text-xs font-normal text-slate-500">Template .xlsx sudah dipisah menjadi kolom kode, nama, kode induk, dan deskripsi.</span>
+                                @error('classificationImport') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </label>
+                            <div class="grid gap-2 sm:grid-cols-2">
+                                <a href="{{ route('archive-classifications.import-template') }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:border-teal-600">
+                                    Download Template
+                                </a>
+                                <button type="submit" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Preview Data</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    @if ($classificationImportPreview)
+                        @php
+                            $previewValidCount = collect($classificationImportPreview)->where('status', 'valid')->count();
+                            $previewDuplicateCount = collect($classificationImportPreview)->where('status', 'duplicate')->count();
+                            $previewRows = $this->classificationPreviewRowsForPage();
+                            $previewTotal = count($classificationImportPreview);
+                            $previewFirst = $previewTotal > 0 ? (($classificationPreviewPage - 1) * $classificationPreviewPerPage) + 1 : 0;
+                            $previewLast = min($classificationPreviewPage * $classificationPreviewPerPage, $previewTotal);
+                            $previewTotalPages = $this->classificationPreviewTotalPages();
+                        @endphp
+                        <div class="mt-5 rounded-lg border border-slate-200 bg-white shadow-sm">
+                            <div class="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 p-4 lg:flex-row lg:items-start lg:justify-between">
+                                <div>
+                                    <h3 class="font-bold">Preview Data Import</h3>
+                                    <p class="text-sm text-slate-500">
+                                        {{ $classificationImportFileName }} | {{ $previewValidCount }} data valid, {{ $previewDuplicateCount }} data duplikat/tidak valid.
+                                    </p>
+                                </div>
+                                <div class="flex flex-col gap-2 sm:flex-row">
+                                    <button type="button" wire:click="cancelClassificationImport" class="min-h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:border-rose-500">
+                                        Batalkan
+                                    </button>
+                                    <button type="button" wire:click="confirmClassificationImport" @disabled($previewValidCount === 0) class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50">
+                                        Simpan Data Valid
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="flex flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                                <div class="text-sm font-semibold text-slate-600">
+                                    Menampilkan {{ $previewFirst }}-{{ $previewLast }} dari {{ $previewTotal }} data preview
+                                </div>
+                                <label class="flex items-center gap-2 text-sm font-bold text-slate-600">
+                                    Per halaman
+                                    <select wire:model.live="classificationPreviewPerPage" class="min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-950">
+                                        @foreach ([10, 25, 50] as $pageSize)
+                                            <option value="{{ $pageSize }}">{{ $pageSize }}</option>
+                                        @endforeach
+                                    </select>
+                                </label>
+                            </div>
+
+                            <div class="overflow-x-auto">
+                                <table class="w-full min-w-[920px] border-collapse text-left text-sm">
+                                    <thead class="bg-white text-xs uppercase text-slate-500">
+                                        <tr>
+                                            <th class="border-b border-slate-200 px-4 py-3">Status</th>
+                                            <th class="border-b border-slate-200 px-4 py-3">Kode</th>
+                                            <th class="border-b border-slate-200 px-4 py-3">Nama</th>
+                                            <th class="border-b border-slate-200 px-4 py-3">Kode Induk</th>
+                                            <th class="border-b border-slate-200 px-4 py-3">Deskripsi</th>
+                                            <th class="border-b border-slate-200 px-4 py-3">Catatan</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach ($previewRows as $index => $item)
+                                            <tr wire:key="classification-preview-{{ $index }}" class="{{ $item['status'] === 'duplicate' ? 'bg-rose-50 text-rose-900' : 'bg-white' }}">
+                                                <td class="border-b border-slate-100 px-4 py-3">
+                                                    <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $item['status'] === 'duplicate' ? 'bg-rose-100 text-rose-700 ring-rose-200' : 'bg-emerald-100 text-emerald-700 ring-emerald-200' }}">
+                                                        {{ $item['status'] === 'duplicate' ? 'Duplikat' : 'Valid' }}
+                                                    </span>
+                                                </td>
+                                                <td class="border-b border-slate-100 px-4 py-3 font-bold">{{ $item['code'] ?: '-' }}</td>
+                                                <td class="border-b border-slate-100 px-4 py-3">{{ $item['name'] ?: '-' }}</td>
+                                                <td class="border-b border-slate-100 px-4 py-3">{{ $item['parent_code'] ?: '-' }}</td>
+                                                <td class="border-b border-slate-100 px-4 py-3">{{ $item['description'] ?: '-' }}</td>
+                                                <td class="border-b border-slate-100 px-4 py-3">{{ $item['reason'] }}</td>
+                                            </tr>
+                                        @endforeach
+                                    </tbody>
+                                </table>
+                            </div>
+                            @if ($previewTotalPages > 1)
+                                <div class="flex flex-col gap-3 border-t border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div class="text-sm font-semibold text-slate-600">Halaman {{ $classificationPreviewPage }} dari {{ $previewTotalPages }}</div>
+                                    <div class="flex gap-2">
+                                        <button type="button" wire:click="setClassificationPreviewPage({{ $classificationPreviewPage - 1 }})" @disabled($classificationPreviewPage <= 1) class="min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600 disabled:cursor-not-allowed disabled:opacity-50">
+                                            Sebelumnya
+                                        </button>
+                                        <button type="button" wire:click="setClassificationPreviewPage({{ $classificationPreviewPage + 1 }})" @disabled($classificationPreviewPage >= $previewTotalPages) class="min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600 disabled:cursor-not-allowed disabled:opacity-50">
+                                            Berikutnya
+                                        </button>
+                                    </div>
+                                </div>
+                            @endif
+                        </div>
+                    @endif
+
+                    <form wire:submit="saveClassification" class="mt-5 grid gap-4 md:grid-cols-2">
+                        <label class="grid gap-1 text-sm font-bold text-slate-600">
+                            Kode Arsip
+                            <input wire:model="classificationCode" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: 000.1.2">
+                            @error('classificationCode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600">
+                            Kode Induk
+                            <input wire:model="classificationParentCode" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: 000.1">
+                            @error('classificationParentCode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600 md:col-span-2">
+                            Nama Klasifikasi
+                            <input wire:model="classificationName" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Perjalanan Dinas Dalam Negeri">
+                            @error('classificationName') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600 md:col-span-2">
+                            Deskripsi
+                            <textarea wire:model="classificationDescription" rows="3" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Keterangan singkat kode klasifikasi arsip"></textarea>
+                            @error('classificationDescription') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <div class="flex flex-col gap-2 md:col-span-2 sm:flex-row sm:justify-end">
+                            @if ($editingClassificationId)
+                                <button type="button" wire:click="resetClassificationForm" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal Edit</button>
+                            @endif
+                            <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
+                                {{ $editingClassificationId ? 'Simpan Perubahan' : 'Tambah Kode Arsip' }}
+                            </button>
+                        </div>
+                    </form>
+
+                    <div class="mt-5 rounded-lg border border-slate-200">
+                        <div class="grid gap-3 border-b border-slate-200 bg-white p-4 md:grid-cols-[minmax(0,1fr)_220px_220px_auto] md:items-end">
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Pencarian
+                                <input wire:model.live.debounce.300ms="classificationSearch" type="search" class="min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950" placeholder="Cari kode, nama, induk, atau deskripsi">
+                            </label>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Jenis Kode
+                                <select wire:model.live="classificationParentFilter" class="min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950">
+                                    @foreach (['Semua', 'Induk Utama', 'Turunan'] as $parentFilter)
+                                        <option value="{{ $parentFilter }}">{{ $parentFilter }}</option>
+                                    @endforeach
+                                </select>
+                            </label>
+                            <label class="grid gap-1 text-sm font-bold text-slate-600">
+                                Status Pemakaian
+                                <select wire:model.live="classificationUsageFilter" class="min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950">
+                                    @foreach (['Semua', 'Dipakai', 'Belum Dipakai'] as $usageFilter)
+                                        <option value="{{ $usageFilter }}">{{ $usageFilter }}</option>
+                                    @endforeach
+                                </select>
+                            </label>
+                            <button type="button" wire:click="resetClassificationFilters" class="min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600">
+                                Reset
+                            </button>
+                        </div>
+                        <div class="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                            <div class="text-sm font-semibold text-slate-600">
+                                @if ($archiveClassifications->total() > 0)
+                                    Menampilkan {{ $archiveClassifications->firstItem() }}-{{ $archiveClassifications->lastItem() }} dari {{ $archiveClassifications->total() }} kode arsip
+                                @else
+                                    Belum ada kode klasifikasi arsip
+                                @endif
+                            </div>
+                            <label class="flex items-center gap-2 text-sm font-bold text-slate-600">
+                                Per halaman
+                                <select wire:model.live="classificationPerPage" class="min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-950">
+                                    @foreach ([10, 25, 50] as $pageSize)
+                                        <option value="{{ $pageSize }}">{{ $pageSize }}</option>
+                                    @endforeach
+                                </select>
+                            </label>
+                        </div>
+
+                        <div class="overflow-x-auto">
+                            <table class="w-full min-w-[920px] border-collapse text-left text-sm">
+                                <thead class="bg-slate-50 text-xs uppercase text-slate-500">
+                                    <tr>
+                                        <th class="border-b border-slate-200 px-4 py-3">Kode</th>
+                                        <th class="border-b border-slate-200 px-4 py-3">Nama Klasifikasi</th>
+                                        <th class="border-b border-slate-200 px-4 py-3">Induk</th>
+                                        <th class="border-b border-slate-200 px-4 py-3">Dipakai Surat</th>
+                                        <th class="border-b border-slate-200 px-4 py-3">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @forelse ($archiveClassifications as $classification)
+                                        <tr wire:key="archive-classification-{{ $classification->id }}">
+                                            <td class="border-b border-slate-100 px-4 py-3 font-bold">{{ $classification->code }}</td>
+                                            <td class="border-b border-slate-100 px-4 py-3">
+                                                <div class="font-semibold">{{ $classification->name }}</div>
+                                                @if ($classification->description)
+                                                    <div class="mt-1 text-xs text-slate-500">{{ $classification->description }}</div>
+                                                @endif
+                                            </td>
+                                            <td class="border-b border-slate-100 px-4 py-3">{{ $classification->parent_code ?? '-' }}</td>
+                                            <td class="border-b border-slate-100 px-4 py-3">{{ $classification->letters_count }}</td>
+                                            <td class="border-b border-slate-100 px-4 py-3">
+                                                <div class="flex flex-wrap gap-2">
+                                                    <button type="button" wire:click="editClassification({{ $classification->id }})" class="whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Edit</button>
+                                                    <button type="button" wire:click="deleteClassification({{ $classification->id }})" wire:confirm="Hapus kode klasifikasi arsip ini?" class="whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50">Hapus</button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    @empty
+                                        <tr>
+                                            <td colspan="5" class="px-4 py-10 text-center text-slate-500">Belum ada kode klasifikasi arsip.</td>
+                                        </tr>
+                                    @endforelse
+                                </tbody>
+                            </table>
+                        </div>
+
+                        @if ($archiveClassifications->hasPages())
+                            <div class="border-t border-slate-200 px-4 py-3">
+                                {{ $archiveClassifications->links() }}
+                            </div>
+                        @endif
                     </div>
                 </section>
                 @endif
