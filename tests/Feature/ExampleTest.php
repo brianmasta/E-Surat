@@ -560,6 +560,44 @@ class ExampleTest extends TestCase
         ]);
     }
 
+    public function test_editing_letter_keeps_existing_number_and_document_when_not_replaced(): void
+    {
+        Storage::fake('public');
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        Storage::disk('public')->put('dokumen-surat/file-lama.pdf', 'file lama');
+
+        $letter = Letter::create([
+            'type' => 'Keluar',
+            'outgoing_input_mode' => 'upload',
+            'unit_code' => 'SET-MRP',
+            'classification_code' => '000.1.1',
+            'number' => '800/555/SET-MRP/'.now()->format('m').'/'.now()->format('Y'),
+            'subject' => 'Surat keluar sebelum edit',
+            'external_party' => 'Biro Umum',
+            'letter_date' => now()->toDateString(),
+            'file_path' => 'dokumen-surat/file-lama.pdf',
+            'status' => 'Selesai',
+        ]);
+
+        Livewire::test('dashboard')
+            ->call('openEditLetterForm', $letter->id)
+            ->assertSee('File lama masih tersimpan')
+            ->set('unitCode', 'MRP')
+            ->set('classificationCode', '000.1.2')
+            ->assertSet('number', '800/555/SET-MRP/'.now()->format('m').'/'.now()->format('Y'))
+            ->set('subject', 'Surat keluar setelah edit')
+            ->call('saveLetter');
+
+        $letter->refresh();
+
+        $this->assertSame('800/555/SET-MRP/'.now()->format('m').'/'.now()->format('Y'), $letter->number);
+        $this->assertSame('MRP', $letter->unit_code);
+        $this->assertSame('000.1.2', $letter->classification_code);
+        $this->assertSame('dokumen-surat/file-lama.pdf', $letter->file_path);
+        Storage::disk('public')->assertExists('dokumen-surat/file-lama.pdf');
+    }
+
     public function test_admin_can_delete_letter_and_its_documents(): void
     {
         Storage::fake('public');

@@ -175,6 +175,11 @@ new class extends Component
         return Letter::with('classification', 'attachments', 'approvals', 'dispositions.children')->find($this->selectedLetterId);
     }
 
+    public function editingLetter(): ?Letter
+    {
+        return $this->editingLetterId ? Letter::find($this->editingLetterId) : null;
+    }
+
     public function archiveClassifications()
     {
         return ArchiveClassification::query()
@@ -359,6 +364,10 @@ new class extends Component
 
     public function updatedUnitCode(string $value): void
     {
+        if ($this->editingLetterId) {
+            return;
+        }
+
         if ($this->type === 'Keluar') {
             $this->number = $this->nextLetterNumber($value, $this->classificationCode);
         }
@@ -370,6 +379,10 @@ new class extends Component
 
     public function updatedClassificationCode(string $value): void
     {
+        if ($this->editingLetterId) {
+            return;
+        }
+
         if ($this->type === 'Keluar') {
             $this->number = $this->nextLetterNumber($this->unitCode, $value);
         }
@@ -1014,6 +1027,7 @@ new class extends Component
     @php
         $letters = $this->letters();
         $selectedLetter = $this->selectedLetter();
+        $editingLetter = $this->editingLetter();
         $classifications = $this->archiveClassifications();
         $dispositionRecipients = $this->dispositionRecipients();
         $currentUser = auth()->user();
@@ -1822,6 +1836,11 @@ new class extends Component
                             <span class="text-xs font-normal text-slate-500">
                                 PDF, JPG, JPEG, atau PNG. Maksimal 5 MB. {{ $type === 'Keluar' && $outgoingInputMode === 'upload' ? 'Wajib untuk mode upload surat jadi.' : '' }}
                             </span>
+                            @if ($editingLetter?->file_path)
+                                <span class="rounded-lg bg-white px-3 py-2 text-xs font-normal text-slate-600 ring-1 ring-slate-200">
+                                    File lama masih tersimpan: <span class="font-semibold">{{ basename($editingLetter->file_path) }}</span>. Upload file baru hanya jika ingin mengganti dokumen.
+                                </span>
+                            @endif
                             @error('document') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <div class="grid gap-4 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
