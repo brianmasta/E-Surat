@@ -179,11 +179,11 @@ new class extends Component
 
     public function saveUnit(): void
     {
-        $this->unitCode = strtoupper(trim($this->unitCode));
+        $this->unitCode = $this->normalizeUnitInput($this->unitCode);
         $oldCode = $this->editingUnitIndex !== null ? ($this->units[$this->editingUnitIndex]['code'] ?? null) : null;
 
         $this->validate([
-            'unitCode' => ['required', 'string', 'max:30', 'regex:/^[A-Z0-9-]+$/'],
+            'unitCode' => ['required', 'string', 'max:30', 'regex:/^[A-Z0-9 -]+$/'],
             'unitName' => ['required', 'string', 'max:100'],
             'unitDescription' => ['nullable', 'string', 'max:255'],
             'unitIsDefault' => ['boolean'],
@@ -191,7 +191,7 @@ new class extends Component
 
         $duplicate = collect($this->units)
             ->filter(fn (array $unit, int $index) => $index !== $this->editingUnitIndex)
-            ->contains(fn (array $unit) => strtoupper($unit['code']) === $this->unitCode);
+            ->contains(fn (array $unit) => $this->normalizeUnitInput($unit['code']) === $this->unitCode);
 
         if ($duplicate) {
             $this->addError('unitCode', 'Kode unit sudah digunakan.');
@@ -294,6 +294,11 @@ new class extends Component
 
         ActivityLog::record('unit.deleted', 'Unit surat dihapus: '.$unit['code']);
         $this->dispatch('notify', message: 'Unit surat dihapus.');
+    }
+
+    public function normalizeUnitInput(?string $code): string
+    {
+        return preg_replace('/\s+/', ' ', strtoupper(trim((string) $code))) ?? '';
     }
 
     public function resetUnitForm(): void
@@ -963,8 +968,8 @@ new class extends Component
                     <form wire:submit="saveUnit" class="mt-5 grid gap-4 md:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Kode Unit
-                            <input wire:model="unitCode" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: SETDA">
-                            <span class="text-xs font-normal text-slate-500">Gunakan huruf, angka, dan tanda hubung. Kode yang sudah dipakai surat tidak bisa diganti.</span>
+                            <input wire:model="unitCode" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: BAG UMUM">
+                            <span class="text-xs font-normal text-slate-500">Gunakan huruf, angka, spasi, dan tanda hubung. Kode yang sudah dipakai surat tidak bisa diganti.</span>
                             @error('unitCode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">

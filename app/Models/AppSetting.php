@@ -62,7 +62,7 @@ class AppSetting extends Model
 
         return collect($units)
             ->map(fn (array $unit) => [
-                'code' => strtoupper(trim((string) ($unit['code'] ?? ''))),
+                'code' => preg_replace('/\s+/', ' ', strtoupper(trim((string) ($unit['code'] ?? '')))) ?? '',
                 'name' => trim((string) ($unit['name'] ?? ($unit['code'] ?? ''))),
                 'description' => trim((string) ($unit['description'] ?? '')),
                 'is_default' => (bool) ($unit['is_default'] ?? false),

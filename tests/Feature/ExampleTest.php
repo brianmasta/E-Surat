@@ -256,6 +256,28 @@ class ExampleTest extends TestCase
         $this->assertNotContains('BUP', AppSetting::letterUnitCodes());
     }
 
+    public function test_letter_unit_code_can_use_spaces(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        Livewire::test('settings')
+            ->call('setSettingsTab', 'unit')
+            ->set('unitCode', 'bag   umum')
+            ->set('unitName', 'Bagian Umum')
+            ->set('unitDescription', 'Unit persuratan bagian umum')
+            ->set('unitIsDefault', true)
+            ->call('saveUnit')
+            ->assertHasNoErrors();
+
+        $this->assertContains('BAG UMUM', AppSetting::letterUnitCodes());
+        $this->assertSame('BAG UMUM', AppSetting::defaultLetterUnitCode());
+
+        Livewire::test('dashboard')
+            ->call('openLetterForm', 'Keluar')
+            ->assertSet('unitCode', 'BAG UMUM')
+            ->assertSet('number', '800/019/BAG UMUM/'.now()->format('m').'/'.now()->format('Y'));
+    }
+
     public function test_used_letter_unit_code_cannot_be_changed_or_deleted(): void
     {
         $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
