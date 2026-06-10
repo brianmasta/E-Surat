@@ -42,6 +42,7 @@ new class extends Component
 ?>
 
 @php($agencyProfile = AppSetting::agency())
+@php($androidApp = AppSetting::getValue('mobile_versions', \App\Http\Controllers\Api\Mobile\AppVersionController::defaults())['android'] ?? \App\Http\Controllers\Api\Mobile\AppVersionController::defaults()['android'])
 
 <main class="grid min-h-screen place-items-center px-4 py-8">
     <section class="w-full max-w-5xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:grid lg:grid-cols-[1fr_420px]">
@@ -97,6 +98,16 @@ new class extends Component
             <button type="submit" class="mt-6 min-h-11 w-full rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
                 Masuk
             </button>
+
+            <a href="{{ $androidApp['download_url'] ?? asset('downloads/esurat-android.apk') }}"
+               class="mt-3 inline-flex min-h-11 w-full items-center justify-center rounded-lg border border-teal-200 bg-teal-50 px-4 text-sm font-bold text-teal-800 hover:border-teal-700"
+               download>
+                Unduh Aplikasi Android
+            </a>
+
+            <div class="mt-2 text-center text-xs text-slate-500">
+                Versi Android {{ $androidApp['current_version_name'] ?? '1.0.0' }}
+            </div>
 
             <div class="mt-5 text-center text-xs text-slate-500">
                 Powered by

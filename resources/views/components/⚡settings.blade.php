@@ -24,6 +24,8 @@ new class extends Component
 
     public array $workflow = [];
 
+    public array $mobileAndroid = [];
+
     public array $units = [];
 
     public array $roles = [];
@@ -125,6 +127,9 @@ new class extends Component
             'notify_disposition' => true,
         ]);
 
+        $this->mobileAndroid = AppSetting::getValue('mobile_versions', \App\Http\Controllers\Api\Mobile\AppVersionController::defaults())['android']
+            ?? \App\Http\Controllers\Api\Mobile\AppVersionController::defaults()['android'];
+
         $this->roles = AppSetting::getValue('roles', []);
 
         $requestedTab = request('tab');
@@ -143,6 +148,7 @@ new class extends Component
             'monitoring-nomor' => 'Monitoring Nomor',
             'pengguna' => 'Pengguna',
             'disposisi' => 'Disposisi',
+            'android' => 'Android',
             'audit' => 'Audit & Peran',
         ];
     }
@@ -234,6 +240,30 @@ new class extends Component
         AppSetting::putValue('workflow', $this->workflow);
         ActivityLog::record('setting.updated', 'Pengaturan alur kerja diperbarui.');
         $this->dispatch('notify', message: 'Pengaturan alur kerja berhasil disimpan.');
+    }
+
+    public function saveMobileAndroid(): void
+    {
+        $this->validate([
+            'mobileAndroid.current_version_name' => ['required', 'string', 'max:30'],
+            'mobileAndroid.current_version_code' => ['required', 'integer', 'min:1'],
+            'mobileAndroid.minimum_version_code' => ['required', 'integer', 'min:1'],
+            'mobileAndroid.download_url' => ['required', 'url', 'max:500'],
+            'mobileAndroid.release_notes' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $versions = AppSetting::getValue('mobile_versions', \App\Http\Controllers\Api\Mobile\AppVersionController::defaults());
+        $versions['android'] = [
+            'current_version_name' => (string) $this->mobileAndroid['current_version_name'],
+            'current_version_code' => (int) $this->mobileAndroid['current_version_code'],
+            'minimum_version_code' => (int) $this->mobileAndroid['minimum_version_code'],
+            'download_url' => (string) $this->mobileAndroid['download_url'],
+            'release_notes' => (string) ($this->mobileAndroid['release_notes'] ?? ''),
+        ];
+
+        AppSetting::putValue('mobile_versions', $versions);
+        ActivityLog::record('setting.updated', 'Pengaturan aplikasi Android diperbarui.');
+        $this->dispatch('notify', message: 'Pengaturan aplikasi Android berhasil disimpan.');
     }
 
     public function unitCodes(): array
@@ -2041,6 +2071,56 @@ new class extends Component
                             </tbody>
                         </table>
                     </div>
+                </section>
+                @endif
+
+                @if ($activeSettingsTab === 'android')
+                <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+                    <div class="border-b border-slate-200 pb-4">
+                        <h2 class="text-lg font-bold">Aplikasi Android</h2>
+                        <p class="text-sm text-slate-500">Atur versi aplikasi, update wajib, dan link unduhan APK yang tampil di halaman login serta dipakai aplikasi Android untuk cek update.</p>
+                    </div>
+
+                    <form wire:submit="saveMobileAndroid" class="mt-5 grid gap-4 md:grid-cols-2">
+                        <label class="grid gap-1 text-sm font-bold text-slate-600">
+                            Nama Versi Saat Ini
+                            <input wire:model="mobileAndroid.current_version_name" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: 1.0.0">
+                            @error('mobileAndroid.current_version_name') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600">
+                            Kode Versi Saat Ini
+                            <input wire:model="mobileAndroid.current_version_code" type="number" min="1" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            @error('mobileAndroid.current_version_code') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600">
+                            Kode Versi Minimum
+                            <input wire:model="mobileAndroid.minimum_version_code" type="number" min="1" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <span class="text-xs font-normal text-slate-500">Jika versi aplikasi di bawah angka ini, update menjadi wajib.</span>
+                            @error('mobileAndroid.minimum_version_code') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600">
+                            Link Unduh APK
+                            <input wire:model="mobileAndroid.download_url" type="url" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="https://esurat.simpelmrp.com/downloads/esurat-android.apk">
+                            @error('mobileAndroid.download_url') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600 md:col-span-2">
+                            Catatan Rilis
+                            <textarea wire:model="mobileAndroid.release_notes" rows="4" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Ringkasan perubahan versi Android terbaru."></textarea>
+                            @error('mobileAndroid.release_notes') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+
+                        <div class="grid gap-3 rounded-lg border border-teal-100 bg-teal-50 p-4 md:col-span-2">
+                            <div>
+                                <div class="text-sm font-bold text-teal-800">Link publik saat ini</div>
+                                <a href="{{ $mobileAndroid['download_url'] ?? '#' }}" target="_blank" class="mt-1 break-all text-sm font-semibold text-teal-900 underline">{{ $mobileAndroid['download_url'] ?? '-' }}</a>
+                            </div>
+                            <div class="text-sm text-teal-900">File APK production ditempatkan di <span class="font-bold">public/downloads/esurat-android.apk</span> agar dapat diakses dari domain.</div>
+                        </div>
+
+                        <div class="flex justify-end md:col-span-2">
+                            <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Simpan Setting Android</button>
+                        </div>
+                    </form>
                 </section>
                 @endif
 

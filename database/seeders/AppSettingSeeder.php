@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\AppSetting;
+use App\Http\Controllers\Api\Mobile\AppVersionController;
 use Illuminate\Database\Seeder;
 
 class AppSettingSeeder extends Seeder
@@ -51,5 +52,7 @@ class AppSettingSeeder extends Seeder
             ['name' => 'Kepala Bagian', 'description' => 'Menerima disposisi pimpinan dan memantau tindak lanjut pada unit kerja.'],
             ['name' => 'Staf Sekretariat', 'description' => 'Menerima instruksi, memproses surat, dan memperbarui status.'],
         ]);
+
+        AppSetting::putValue('mobile_versions', AppVersionController::defaults());
     }
 }

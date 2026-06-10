@@ -40,6 +40,90 @@ class ExampleTest extends TestCase
         $this->get('/')->assertRedirect(route('login'));
     }
 
+    public function test_mobile_version_endpoint_reports_available_and_required_update(): void
+    {
+        AppSetting::putValue('mobile_versions', [
+            'android' => [
+                'current_version_name' => '1.2.0',
+                'current_version_code' => 12,
+                'minimum_version_code' => 10,
+                'download_url' => 'https://example.test/esurat.apk',
+                'release_notes' => 'Perbaikan disposisi Android.',
+            ],
+        ]);
+
+        $this->getJson('/api/mobile/version?platform=android&version_code=9')
+            ->assertOk()
+            ->assertJson([
+                'platform' => 'android',
+                'current_version_name' => '1.2.0',
+                'current_version_code' => 12,
+                'minimum_version_code' => 10,
+                'update_available' => true,
+                'update_required' => true,
+            ]);
+    }
+
+    public function test_mobile_login_returns_token_and_can_open_dashboard(): void
+    {
+        $login = $this->postJson('/api/mobile/login', [
+            'email' => 'admin@mrp-papuatengah.test',
+            'password' => 'password',
+            'device_name' => 'Android test',
+        ]);
+
+        $login
+            ->assertOk()
+            ->assertJsonPath('token_type', 'Bearer')
+            ->assertJsonPath('user.role', 'Admin Sekretariat');
+
+        $token = $login->json('access_token');
+
+        $this->withHeader('Authorization', 'Bearer '.$token)
+            ->getJson('/api/mobile/dashboard')
+            ->assertOk()
+            ->assertJsonStructure([
+                'summary' => ['letters_total', 'incoming_total', 'outgoing_total', 'task_total'],
+                'tasks' => ['incoming', 'dispositions', 'approvals', 'deadlines'],
+            ]);
+    }
+
+    public function test_mobile_numbering_endpoint_returns_auto_and_unused_numbers(): void
+    {
+        $admin = User::where('role', 'Admin Sekretariat')->firstOrFail();
+
+        AppSetting::putValue('letter_numbering', [
+            'prefix' => '800',
+            'unit_code' => 'MOB',
+            'separator' => '/',
+            'include_month' => true,
+            'include_year' => true,
+            'next_sequence' => 4,
+        ]);
+        AppSetting::putValue('letter_units', [
+            ['code' => 'MOB', 'name' => 'Mobile Test', 'description' => 'Unit uji mobile', 'is_default' => true],
+        ]);
+
+        foreach ([1, 3] as $sequence) {
+            Letter::create([
+                'type' => 'Keluar',
+                'unit_code' => 'MOB',
+                'number' => '800/'.str_pad((string) $sequence, 3, '0', STR_PAD_LEFT).'/MOB/'.now()->format('m').'/'.now()->format('Y'),
+                'subject' => 'Surat mobile nomor '.$sequence,
+                'external_party' => 'Instansi Tujuan',
+                'letter_date' => now()->toDateString(),
+                'status' => 'Selesai',
+            ]);
+        }
+
+        $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/mobile/numbering?unit_code=MOB&year='.now()->format('Y'))
+            ->assertOk()
+            ->assertJsonPath('numbering.next_outgoing_number', '800/004/MOB/'.now()->format('m').'/'.now()->format('Y'))
+            ->assertJsonPath('numbering.missing_count', 1)
+            ->assertJsonPath('numbering.missing_items.0.sequence', 2);
+    }
+
     public function test_my_tasks_requires_login(): void
     {
         $this->get('/tugas-saya')->assertRedirect(route('login'));

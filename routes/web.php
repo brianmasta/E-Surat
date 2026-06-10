@@ -4,6 +4,7 @@ use App\Models\ActivityLog;
 use App\Models\Letter;
 use App\Models\LetterAttachment;
 use App\Support\OutgoingLetterDocx;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
 
@@ -18,6 +19,16 @@ Route::post('/logout', function () {
 
     return redirect()->route('login');
 })->middleware('auth')->name('logout');
+
+Route::get('/downloads/esurat-android.apk', function () {
+    $path = public_path('downloads/esurat-android.apk');
+
+    abort_unless(File::exists($path), 404);
+
+    return response()->download($path, 'esurat-android.apk', [
+        'Content-Type' => 'application/vnd.android.package-archive',
+    ]);
+})->name('android.download');
 
 Route::get('/', function () {
     return view('dashboard');
