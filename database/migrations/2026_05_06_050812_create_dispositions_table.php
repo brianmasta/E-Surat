@@ -13,7 +13,7 @@ return new class extends Migration
     {
         Schema::create('dispositions', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('letter_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('letter_id')->nullable()->constrained()->nullOnDelete();
             $table->string('sender_name');
             $table->string('recipient_name');
             $table->text('instruction');

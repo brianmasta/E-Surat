@@ -42,6 +42,11 @@ class User extends Authenticatable
         return $this->role === 'Pimpinan MRP';
     }
 
+    public function isPersonalSecretary(): bool
+    {
+        return $this->role === 'Sekretaris Pribadi';
+    }
+
     public function isStaff(): bool
     {
         return $this->role === 'Staf Sekretariat';

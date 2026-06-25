@@ -109,7 +109,7 @@ new class extends Component
         ]);
 
         $parent->update(['status' => 'Diproses']);
-        $parent->letter?->update(['status' => 'Diproses']);
+        $parent->letter?->syncDispositionStatus();
 
         ActivityLog::record(
             'disposition.forwarded',
@@ -132,14 +132,7 @@ new class extends Component
         abort_unless($this->canActOnDisposition($disposition), 403);
 
         $disposition->update(['status' => $status]);
-
-        if ($status === 'Diproses') {
-            $disposition->letter?->update(['status' => 'Diproses']);
-        }
-
-        if ($status === 'Selesai') {
-            $disposition->letter?->update(['status' => 'Selesai']);
-        }
+        $disposition->letter?->syncDispositionStatus();
 
         ActivityLog::record(
             'disposition.status_updated',
@@ -201,7 +194,7 @@ new class extends Component
 
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
-            <div class="grid h-11 w-11 place-items-center rounded-lg bg-teal-100 font-bold text-teal-800">{{ $agencyProfile['short_name'] }}</div>
+            <x-app-logo class="h-11 w-11" />
             <div>
                 <div class="font-semibold">{{ $agencyProfile['app_name'] }}</div>
                 <div class="text-sm text-slate-400">Area Kepala Bagian</div>
@@ -209,19 +202,22 @@ new class extends Component
         </div>
 
         <nav class="mt-8 grid gap-2">
-            <a href="{{ route('dashboard') }}" class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">Dasbor Umum</a>
+            <a href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor Umum</a>
             <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
-                <span>Tugas Saya</span>
+                <span class="inline-flex items-center gap-2"><x-icon name="task" class="h-4 w-4" />Tugas Saya</span>
                 @if ($taskCount > 0)
                     <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
                 @endif
             </a>
-            @if ($currentUser?->isAdmin() || $currentUser?->isLeader())
-                <a href="{{ route('leadership') }}" class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">Pimpinan</a>
+            @if ($currentUser?->isAdmin() || $currentUser?->isLeader() || $currentUser?->isPersonalSecretary())
+                <a href="{{ route('leadership') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Pimpinan</a>
             @endif
-            <a href="{{ route('department-head') }}" class="rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white">Kepala Bagian</a>
+            <a href="{{ route('tracking') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
+            <a href="{{ route('department-head') }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="users" class="h-4 w-4" />Kepala Bagian</a>
             @if ($currentUser?->isAdmin())
-                <a href="{{ route('settings') }}" class="rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">Setting</a>
+                <a href="{{ route('number-monitor') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
+                <a href="{{ route('sk-numbering') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
+                <a href="{{ route('settings') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
             @endif
         </nav>
 
@@ -241,6 +237,7 @@ new class extends Component
             <form method="POST" action="{{ route('logout') }}">
                 @csrf
                 <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
+                    <x-icon name="logout" class="mr-2 h-4 w-4" />
                     Logout
                 </button>
             </form>
@@ -297,10 +294,10 @@ new class extends Component
                                 tabindex="0"
                                 class="cursor-pointer transition {{ $selectedDispositionId === $disposition->id ? 'bg-teal-50' : 'hover:bg-slate-50' }}">
                                 <td class="border-b border-slate-100 px-5 py-4">
-                                    <div class="font-bold">{{ $disposition->letter?->number }}</div>
-                                    <div class="text-xs text-slate-500">{{ $disposition->letter?->external_party }}</div>
+                                    <div class="font-bold">{{ $disposition->letter?->number ?: 'Disposisi Mandiri' }}</div>
+                                    <div class="text-xs text-slate-500">{{ $disposition->letter?->external_party ?: $disposition->sender_name }}</div>
                                 </td>
-                                <td class="border-b border-slate-100 px-5 py-4">{{ $disposition->letter?->subject }}</td>
+                                <td class="border-b border-slate-100 px-5 py-4">{{ $disposition->letter?->subject ?: 'Arahan langsung / tanpa surat masuk' }}</td>
                                 <td class="border-b border-slate-100 px-5 py-4">{{ $disposition->instruction }}</td>
                                 <td class="border-b border-slate-100 px-5 py-4">
                                     <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($disposition->status) }}">{{ $disposition->status }}</span>
@@ -321,13 +318,13 @@ new class extends Component
         </section>
 
         @if ($showDetailModal && $selectedDisposition)
-            <div class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
+            <div wire:click.self="$set('showDetailModal', false)" class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
                 <div class="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-white shadow-xl">
                     <div class="flex items-start justify-between gap-4 border-b border-slate-200 p-6">
                         <div>
                             <p class="text-xs font-bold uppercase text-teal-700">Disposisi Kepala Bagian</p>
                             <h2 class="mt-1 text-xl font-bold">Detail Disposisi</h2>
-                            <p class="mt-1 text-sm text-slate-500">{{ $selectedDisposition->letter?->number }}</p>
+                            <p class="mt-1 text-sm text-slate-500">{{ $selectedDisposition->letter?->number ?: 'Disposisi Mandiri' }}</p>
                         </div>
                         <button type="button" wire:click="$set('showDetailModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
                     </div>
@@ -354,6 +351,9 @@ new class extends Component
                                         <a href="{{ route('letters.document.review', $selectedDisposition->letter) }}" target="_blank" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Review Dokumen</a>
                                         <a href="{{ route('letters.document.download', $selectedDisposition->letter) }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Download</a>
                                     @endif
+                                    @if ($selectedDisposition->scan_path)
+                                        <a href="{{ route('dispositions.scan.review', $selectedDisposition) }}" target="_blank" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-amber-200 bg-white px-4 text-sm font-bold text-amber-700 hover:border-amber-500">Buka Scan Disposisi</a>
+                                    @endif
                                 </div>
                             </div>
                         @endif
@@ -371,17 +371,29 @@ new class extends Component
                                 <div class="text-xs font-bold uppercase text-slate-500">Instruksi</div>
                                 <div class="mt-1 rounded-lg bg-slate-50 p-3 text-sm text-slate-700">{{ $selectedDisposition->instruction }}</div>
                             </div>
+                            @if ($selectedDisposition->scan_path)
+                                <div class="sm:col-span-2">
+                                    <div class="text-xs font-bold uppercase text-slate-500">Scan Disposisi Pimpinan</div>
+                                    <div class="mt-2 flex flex-wrap gap-2">
+                                        <a href="{{ route('dispositions.scan.review', $selectedDisposition) }}" target="_blank" class="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-bold hover:border-teal-600">Buka Scan</a>
+                                        <a href="{{ route('dispositions.scan.download', $selectedDisposition) }}" class="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800">Download Scan</a>
+                                    </div>
+                                    @if ($selectedDisposition->input_by_name)
+                                        <div class="mt-2 text-xs text-slate-500">Diinput oleh {{ $selectedDisposition->input_by_name }} ({{ $selectedDisposition->input_by_role }})</div>
+                                    @endif
+                                </div>
+                            @endif
                             <div>
                                 <div class="text-xs font-bold uppercase text-slate-500">Kode Klasifikasi Arsip</div>
                                 <div class="font-semibold">{{ $selectedDisposition->letter?->classification_code ?: '-' }}</div>
                             </div>
                             <div>
                                 <div class="text-xs font-bold uppercase text-slate-500">Pengirim Surat</div>
-                                <div class="font-semibold">{{ $selectedDisposition->letter?->external_party }}</div>
+                                <div class="font-semibold">{{ $selectedDisposition->letter?->external_party ?: $selectedDisposition->sender_name }}</div>
                             </div>
                             <div class="sm:col-span-2">
                                 <div class="text-xs font-bold uppercase text-slate-500">Perihal Surat</div>
-                                <div class="font-semibold">{{ $selectedDisposition->letter?->subject }}</div>
+                                <div class="font-semibold">{{ $selectedDisposition->letter?->subject ?: 'Arahan langsung / tanpa surat masuk' }}</div>
                             </div>
                         </div>
                     </div>
@@ -390,7 +402,7 @@ new class extends Component
         @endif
 
         @if ($showForwardModal)
-            <div class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
+            <div wire:click.self="$set('showForwardModal', false)" class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
                 <form wire:submit="forwardDisposition" class="w-full max-w-xl rounded-lg bg-white p-6 shadow-xl">
                     <div class="flex items-start justify-between gap-4">
                         <div>

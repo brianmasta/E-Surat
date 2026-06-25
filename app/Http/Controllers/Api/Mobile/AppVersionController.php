@@ -35,11 +35,11 @@ class AppVersionController extends Controller
     {
         return [
             'android' => [
-                'current_version_name' => '1.0.0',
-                'current_version_code' => 1,
+                'current_version_name' => '1.0.1',
+                'current_version_code' => 2,
                 'minimum_version_code' => 1,
                 'download_url' => 'https://esurat.simpelmrp.com/downloads/esurat-android.apk',
-                'release_notes' => 'Rilis awal aplikasi Android E-Surat.',
+                'release_notes' => 'Pembaruan logo, disposisi mandiri, penomoran SK, dan penyesuaian production.',
             ],
         ];
     }

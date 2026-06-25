@@ -147,15 +147,24 @@ class LetterController extends Controller
         abort_unless($request->user()?->isAdmin() || $request->user()?->isStaff(), 403);
 
         $validated = $request->validate([
-            'status' => ['required', 'in:Baru,Disposisi,Diproses,Selesai'],
+            'status' => ['required', 'in:Baru,Disposisi Pimpinan,Disposisi,Diproses,Selesai'],
         ]);
 
         $letter->update(['status' => $validated['status']]);
+
+        if ($letter->canReceiveDisposition() && $letter->dispositions()->exists()) {
+            if ($validated['status'] === 'Selesai') {
+                $letter->dispositions()->where('status', '!=', 'Selesai')->update(['status' => 'Selesai']);
+            }
+
+            $letter->syncDispositionStatus();
+        }
+
         ActivityLog::record('mobile.letter.status_updated', 'Status surat diperbarui dari Android: '.$letter->number, $letter);
 
         return response()->json([
             'message' => 'Status surat diperbarui.',
-            'letter' => MobileApiFormatter::letter($letter->fresh('classification')),
+            'letter' => MobileApiFormatter::letter($letter->fresh('classification', 'dispositions')),
         ]);
     }
 

@@ -47,10 +47,10 @@ new class extends Component
 <main class="grid min-h-screen place-items-center px-4 py-8">
     <section class="w-full max-w-5xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:grid lg:grid-cols-[1fr_420px]">
         <div class="bg-slate-900 p-8 text-white lg:p-10">
-            <div class="grid h-12 w-12 place-items-center rounded-lg bg-teal-100 font-bold text-teal-800">{{ $agencyProfile['short_name'] }}</div>
+            <x-app-logo class="h-14 w-14" />
             <h1 class="mt-8 text-3xl font-bold tracking-normal">{{ $agencyProfile['app_name'] }}</h1>
             <p class="mt-3 max-w-xl text-sm leading-6 text-slate-300">
-                Sistem persuratan untuk {{ $agencyProfile['name'] }}, dengan akses berbeda untuk Admin, Pimpinan, Kepala Bagian, dan Staf.
+                Sistem persuratan untuk {{ $agencyProfile['name'] }}, dengan akses berbeda untuk Admin, Pimpinan, Sekretaris Pribadi, Kepala Bagian, dan Staf.
             </p>
 
             <div class="mt-8 grid gap-3 text-sm">
@@ -61,6 +61,10 @@ new class extends Component
                 <div class="rounded-lg bg-white/10 p-4">
                     <div class="font-bold">Pimpinan</div>
                     <div class="text-slate-300">Melihat surat dan memberi disposisi elektronik.</div>
+                </div>
+                <div class="rounded-lg bg-white/10 p-4">
+                    <div class="font-bold">Sekretaris Pribadi</div>
+                    <div class="text-slate-300">Menginput scan disposisi pimpinan untuk diteruskan.</div>
                 </div>
                 <div class="rounded-lg bg-white/10 p-4">
                     <div class="font-bold">Kepala Bagian</div>
@@ -122,6 +126,7 @@ new class extends Component
                 <div class="mt-2 grid gap-1">
                     <div>Admin: admin@mrp-papuatengah.test</div>
                     <div>Pimpinan: pimpinan@mrp-papuatengah.test</div>
+                    <div>Sekretaris Pribadi: sekpri@mrp-papuatengah.test</div>
                     <div>Kepala Bagian: kepala.bagian@mrp-papuatengah.test</div>
                     <div>Staf: staf@mrp-papuatengah.test</div>
                     <div>Password semua akun: password</div>

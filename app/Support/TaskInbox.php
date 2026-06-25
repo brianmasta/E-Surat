@@ -32,7 +32,7 @@ class TaskInbox
 
     public static function incomingForDisposition(User $user): Collection
     {
-        if (! ($user->isAdmin() || $user->isLeader())) {
+        if (! ($user->isAdmin() || $user->isLeader() || $user->isPersonalSecretary())) {
             return collect();
         }
 

@@ -1,8 +1,11 @@
 <?php
 
 use App\Models\ActivityLog;
+use App\Models\DecisionLetterNumber;
+use App\Models\Disposition;
 use App\Models\Letter;
 use App\Models\LetterAttachment;
+use App\Support\DocumentAccess;
 use App\Support\OutgoingLetterDocx;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Route;
@@ -34,13 +37,29 @@ Route::get('/', function () {
     return view('dashboard');
 })->middleware('auth')->name('dashboard');
 
+Route::get('/monitoring-nomor-surat', function () {
+    abort_unless(auth()->user()?->isAdmin(), 403);
+
+    return view('number-monitor');
+})->middleware('auth')->name('number-monitor');
+
+Route::get('/penomoran-sk', function () {
+    abort_unless(auth()->user()?->isAdmin(), 403);
+
+    return view('sk-numbering');
+})->middleware('auth')->name('sk-numbering');
+
+Route::get('/tracking-surat', function () {
+    return view('tracking');
+})->middleware('auth')->name('tracking');
+
 Route::get('/tugas-saya', function () {
     return view('my-tasks');
 })->middleware('auth')->name('my-tasks');
 
 Route::get('/pimpinan', function () {
     $user = auth()->user();
-    abort_unless($user?->isAdmin() || $user?->isLeader(), 403);
+    abort_unless($user?->isAdmin() || $user?->isLeader() || $user?->isPersonalSecretary(), 403);
 
     return view('leadership');
 })->middleware('auth')->name('leadership');
@@ -53,6 +72,7 @@ Route::get('/kepala-bagian', function () {
 })->middleware('auth')->name('department-head');
 
 Route::get('/letters/{letter}/document', function (Letter $letter) {
+    abort_unless(DocumentAccess::canViewLetter(auth()->user(), $letter), 403);
     abort_unless($letter->file_path && Storage::disk('public')->exists($letter->file_path), 404);
 
     ActivityLog::record('document.reviewed', 'Dokumen surat direview: '.$letter->number, $letter);
@@ -61,6 +81,7 @@ Route::get('/letters/{letter}/document', function (Letter $letter) {
 })->middleware('auth')->name('letters.document.review');
 
 Route::get('/letters/{letter}/document/download', function (Letter $letter) {
+    abort_unless(DocumentAccess::canViewLetter(auth()->user(), $letter), 403);
     abort_unless($letter->file_path && Storage::disk('public')->exists($letter->file_path), 404);
 
     ActivityLog::record('document.downloaded', 'Dokumen surat didownload: '.$letter->number, $letter);
@@ -72,6 +93,7 @@ Route::get('/letters/{letter}/document/download', function (Letter $letter) {
 })->middleware('auth')->name('letters.document.download');
 
 Route::get('/letter-attachments/{attachment}/review', function (LetterAttachment $attachment) {
+    abort_unless(DocumentAccess::canViewAttachment(auth()->user(), $attachment), 403);
     abort_unless(Storage::disk('public')->exists($attachment->file_path), 404);
 
     ActivityLog::record('attachment.reviewed', 'Lampiran direview: '.$attachment->original_name, $attachment);
@@ -80,6 +102,7 @@ Route::get('/letter-attachments/{attachment}/review', function (LetterAttachment
 })->middleware('auth')->name('letter-attachments.review');
 
 Route::get('/letter-attachments/{attachment}/download', function (LetterAttachment $attachment) {
+    abort_unless(DocumentAccess::canViewAttachment(auth()->user(), $attachment), 403);
     abort_unless(Storage::disk('public')->exists($attachment->file_path), 404);
 
     ActivityLog::record('attachment.downloaded', 'Lampiran didownload: '.$attachment->original_name, $attachment);
@@ -89,6 +112,48 @@ Route::get('/letter-attachments/{attachment}/download', function (LetterAttachme
         $attachment->original_name,
     );
 })->middleware('auth')->name('letter-attachments.download');
+
+Route::get('/dispositions/{disposition}/scan', function (Disposition $disposition) {
+    abort_unless(DocumentAccess::canViewDispositionScan(auth()->user(), $disposition), 403);
+    abort_unless($disposition->scan_path && Storage::disk('public')->exists($disposition->scan_path), 404);
+
+    ActivityLog::record('disposition_scan.reviewed', 'Scan disposisi direview: '.$disposition->letter?->number, $disposition);
+
+    return response()->file(Storage::disk('public')->path($disposition->scan_path));
+})->middleware('auth')->name('dispositions.scan.review');
+
+Route::get('/dispositions/{disposition}/scan/download', function (Disposition $disposition) {
+    abort_unless(DocumentAccess::canViewDispositionScan(auth()->user(), $disposition), 403);
+    abort_unless($disposition->scan_path && Storage::disk('public')->exists($disposition->scan_path), 404);
+
+    ActivityLog::record('disposition_scan.downloaded', 'Scan disposisi didownload: '.$disposition->letter?->number, $disposition);
+
+    return response()->download(
+        Storage::disk('public')->path($disposition->scan_path),
+        $disposition->scan_original_name ?: basename($disposition->scan_path),
+    );
+})->middleware('auth')->name('dispositions.scan.download');
+
+Route::get('/decision-letter-numbers/{record}/file', function (DecisionLetterNumber $record) {
+    abort_unless(auth()->user()?->isAdmin(), 403);
+    abort_unless($record->file_path && Storage::disk('public')->exists($record->file_path), 404);
+
+    ActivityLog::record('sk_number.file_reviewed', 'File SK dibuka: '.$record->number, $record);
+
+    return response()->file(Storage::disk('public')->path($record->file_path));
+})->middleware('auth')->name('sk-numbering.file.review');
+
+Route::get('/decision-letter-numbers/{record}/file/download', function (DecisionLetterNumber $record) {
+    abort_unless(auth()->user()?->isAdmin(), 403);
+    abort_unless($record->file_path && Storage::disk('public')->exists($record->file_path), 404);
+
+    ActivityLog::record('sk_number.file_downloaded', 'File SK didownload: '.$record->number, $record);
+
+    return response()->download(
+        Storage::disk('public')->path($record->file_path),
+        $record->file_original_name ?: basename($record->file_path),
+    );
+})->middleware('auth')->name('sk-numbering.file.download');
 
 Route::get('/letters/{letter}/template/pdf', function (Letter $letter) {
     abort_unless($letter->type === 'Keluar' && $letter->outgoing_body, 404);

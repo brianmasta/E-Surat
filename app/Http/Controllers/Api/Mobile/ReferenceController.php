@@ -26,7 +26,7 @@ class ReferenceController extends Controller
                 'types' => ['Masuk', 'Keluar'],
                 'natures' => ['Biasa', 'Penting', 'Rahasia', 'Sangat Rahasia'],
                 'urgencies' => ['Normal', 'Segera', 'Sangat Segera'],
-                'statuses' => ['Baru', 'Disposisi', 'Diproses', 'Selesai'],
+                'statuses' => ['Baru', 'Disposisi Pimpinan', 'Diproses', 'Selesai'],
                 'retention_categories' => ['Aktif', 'Inaktif', 'Permanen', 'Siap Musnah', 'Dimusnahkan'],
             ],
         ]);

@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\AppSetting;
 use App\Models\ActivityLog;
 use App\Models\ArchiveClassification;
+use App\Models\DecisionLetterNumber;
 use App\Models\DispositionRecipient;
 use App\Models\Letter;
 use App\Models\LetterAttachment;
@@ -124,6 +125,157 @@ class ExampleTest extends TestCase
             ->assertJsonPath('numbering.missing_items.0.sequence', 2);
     }
 
+    public function test_mobile_disposition_can_send_to_multiple_recipients_with_scan(): void
+    {
+        Storage::fake('public');
+
+        $secretary = User::where('role', 'Sekretaris Pribadi')->firstOrFail();
+        $letter = Letter::where('type', 'Masuk')->where('status', 'Baru')->firstOrFail();
+        $first = DispositionRecipient::where('name', 'Kepala Bagian Umum')->firstOrFail();
+        $second = DispositionRecipient::create([
+            'name' => 'Kepala Bagian Persidangan Mobile',
+            'position' => 'Kepala Bagian',
+            'unit' => 'Persidangan',
+            'is_active' => true,
+        ]);
+        $scan = UploadedFile::fake()->create('scan-mobile.pdf', 80, 'application/pdf');
+
+        $this->actingAs($secretary, 'sanctum')
+            ->post('/api/mobile/letters/'.$letter->id.'/dispositions', [
+                'recipient_ids' => [$first->id, $second->id],
+                'instruction' => 'Mohon ditindaklanjuti dari aplikasi mobile.',
+                'disposition_scan' => $scan,
+            ])
+            ->assertCreated()
+            ->assertJsonCount(2, 'dispositions')
+            ->assertJsonPath('dispositions.0.input_method', 'Upload File Disposisi')
+            ->assertJsonPath('dispositions.0.input_by_role', 'Sekretaris Pribadi');
+
+        foreach ([$first, $second] as $recipient) {
+            $this->assertDatabaseHas('dispositions', [
+                'letter_id' => $letter->id,
+                'disposition_recipient_id' => $recipient->id,
+                'input_method' => 'Upload File Disposisi',
+                'input_by_name' => $secretary->name,
+            ]);
+        }
+
+        $disposition = $letter->fresh()->dispositions()->latest()->firstOrFail();
+        Storage::disk('public')->assertExists($disposition->scan_path);
+    }
+
+    public function test_mobile_disposition_is_limited_to_incoming_letters(): void
+    {
+        $leader = User::where('role', 'Pimpinan MRP')->firstOrFail();
+        $letter = Letter::where('type', 'Keluar')->firstOrFail();
+        $recipient = DispositionRecipient::where('is_active', true)->firstOrFail();
+
+        $this->actingAs($leader, 'sanctum')
+            ->post('/api/mobile/letters/'.$letter->id.'/dispositions', [
+                'recipient_ids' => [$recipient->id],
+                'instruction' => 'Disposisi tidak boleh untuk surat keluar.',
+            ])
+            ->assertStatus(422);
+    }
+
+    public function test_mobile_can_create_standalone_disposition(): void
+    {
+        $leader = User::where('role', 'Pimpinan MRP')->firstOrFail();
+        $recipient = DispositionRecipient::where('name', 'Kepala Bagian Umum')->firstOrFail();
+
+        $this->actingAs($leader, 'sanctum')
+            ->post('/api/mobile/dispositions', [
+                'recipient_ids' => [$recipient->id],
+                'instruction' => 'Arahan langsung pimpinan tanpa surat masuk.',
+            ])
+            ->assertCreated()
+            ->assertJsonPath('disposition.letter_id', null)
+            ->assertJsonPath('disposition.recipient_id', $recipient->id)
+            ->assertJsonPath('disposition.letter', null);
+
+        $this->assertDatabaseHas('dispositions', [
+            'letter_id' => null,
+            'recipient_name' => 'Kepala Bagian Umum',
+            'disposition_recipient_id' => $recipient->id,
+            'instruction' => 'Arahan langsung pimpinan tanpa surat masuk.',
+        ]);
+    }
+
+    public function test_mobile_sk_numbering_can_create_update_delete_and_open_file(): void
+    {
+        Storage::fake('public');
+
+        $admin = User::where('role', 'Admin Sekretariat')->firstOrFail();
+        $year = (int) now()->format('Y');
+
+        $create = $this->actingAs($admin, 'sanctum')
+            ->post('/api/mobile/sk-numbers', [
+                'unit_code' => 'SET-MRP',
+                'classification_code' => '180.1',
+                'year' => $year,
+                'include_year' => '1',
+                'title' => 'SK mobile dengan file',
+                'decision_date' => now()->toDateString(),
+                'sequence' => '1',
+                'status' => 'Dipesan',
+                'notes' => 'Dicatat dari aplikasi Android.',
+                'file' => UploadedFile::fake()->create('sk-mobile.pdf', 80, 'application/pdf'),
+            ])
+            ->assertCreated()
+            ->assertJsonPath('record.number', '180.1/001/SET-MRP/'.$year)
+            ->assertJsonPath('record.has_file', true);
+
+        $record = DecisionLetterNumber::findOrFail($create->json('record.id'));
+        Storage::disk('public')->assertExists($record->file_path);
+
+        $this->actingAs($admin, 'sanctum')
+            ->getJson('/api/mobile/sk-numbers?unit_code=SET-MRP&year='.$year)
+            ->assertOk()
+            ->assertJsonPath('settings.classification_code', '180.1')
+            ->assertJsonPath('data.0.number', '180.1/001/SET-MRP/'.$year);
+
+        $this->actingAs($admin, 'sanctum')
+            ->get(route('api.mobile.sk-numbers.file', $record, false))
+            ->assertOk();
+
+        $this->actingAs($admin, 'sanctum')
+            ->post('/api/mobile/sk-numbers/'.$record->id, [
+                'unit_code' => 'SET-MRP',
+                'classification_code' => '180.2',
+                'year' => $year,
+                'include_year' => '0',
+                'title' => 'SK mobile diperbarui',
+                'decision_date' => now()->toDateString(),
+                'sequence' => '2',
+                'status' => 'Dipakai',
+                'notes' => 'Diperbarui tanpa upload file baru.',
+            ])
+            ->assertOk()
+            ->assertJsonPath('record.number', '180.2/002/SET-MRP')
+            ->assertJsonPath('record.has_file', true);
+
+        $record->refresh();
+        $filePath = $record->file_path;
+
+        $this->assertDatabaseHas('decision_letter_numbers', [
+            'id' => $record->id,
+            'classification_code' => '180.2',
+            'number' => '180.2/002/SET-MRP',
+            'title' => 'SK mobile diperbarui',
+            'file_path' => $filePath,
+        ]);
+        Storage::disk('public')->assertExists($filePath);
+
+        $this->actingAs($admin, 'sanctum')
+            ->delete('/api/mobile/sk-numbers/'.$record->id)
+            ->assertOk();
+
+        $this->assertDatabaseMissing('decision_letter_numbers', [
+            'id' => $record->id,
+        ]);
+        Storage::disk('public')->assertMissing($filePath);
+    }
+
     public function test_my_tasks_requires_login(): void
     {
         $this->get('/tugas-saya')->assertRedirect(route('login'));
@@ -139,6 +291,10 @@ class ExampleTest extends TestCase
     public function test_leadership_page_requires_leader_role(): void
     {
         $this->actingAs(User::where('role', 'Pimpinan MRP')->first());
+
+        $this->get('/pimpinan')->assertOk();
+
+        $this->actingAs(User::where('role', 'Sekretaris Pribadi')->first());
 
         $this->get('/pimpinan')->assertOk();
 
@@ -173,6 +329,14 @@ class ExampleTest extends TestCase
             ->assertDontSee('Setting');
 
         $this->actingAs(User::where('role', 'Pimpinan MRP')->first());
+
+        $this->get('/')
+            ->assertOk()
+            ->assertSee('Halaman Pimpinan')
+            ->assertDontSee('Halaman Kepala Bagian')
+            ->assertDontSee('Setting');
+
+        $this->actingAs(User::where('role', 'Sekretaris Pribadi')->first());
 
         $this->get('/')
             ->assertOk()
@@ -701,17 +865,253 @@ class ExampleTest extends TestCase
             ->assertSee('masih kosong');
     }
 
-    public function test_dashboard_shows_monitoring_number_button_for_admin(): void
+    public function test_number_monitor_page_shows_unused_outgoing_letter_sequences(): void
+    {
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
+
+        AppSetting::putValue('letter_numbering', [
+            'prefix' => '800',
+            'unit_code' => 'SET-MRP',
+            'separator' => '/',
+            'include_month' => true,
+            'include_year' => true,
+            'next_sequence' => 6,
+        ]);
+
+        $letterDates = [
+            1 => now()->subDays(10),
+            3 => now()->subDays(8),
+            5 => now()->subDays(6),
+        ];
+
+        foreach ([1, 3, 5] as $sequence) {
+            Letter::create([
+                'type' => 'Keluar',
+                'unit_code' => 'SET-MRP',
+                'number' => '800/'.str_pad((string) $sequence, 3, '0', STR_PAD_LEFT).'/SET-MRP/'.$letterDates[$sequence]->format('m').'/'.$letterDates[$sequence]->format('Y'),
+                'subject' => 'Surat monitoring halaman '.$sequence,
+                'external_party' => 'Biro Umum',
+                'letter_date' => $letterDates[$sequence]->toDateString(),
+                'status' => 'Selesai',
+            ]);
+        }
+
+        $this->get('/monitoring-nomor-surat')
+            ->assertOk()
+            ->assertSee('Monitoring Nomor Surat');
+
+        Livewire::test('number-monitor-page')
+            ->set('unitCode', 'SET-MRP')
+            ->set('year', (int) now()->format('Y'))
+            ->set('checkSequence', '4')
+            ->assertSee('Nomor Kosong yang Bisa Dipakai')
+            ->assertSee('Histori Nomor Terpakai')
+            ->assertSee('Rekomendasi tanggal lama')
+            ->assertSee('002')
+            ->assertSee('004')
+            ->assertSee('Nomor 004')
+            ->assertSee('masih kosong')
+            ->assertSee('Pakai');
+    }
+
+    public function test_number_monitor_page_requires_admin_role(): void
+    {
+        $this->actingAs(User::where('role', 'Staf Sekretariat')->first());
+
+        $this->get('/monitoring-nomor-surat')->assertForbidden();
+    }
+
+    public function test_sk_numbering_page_can_create_and_track_decision_numbers(): void
+    {
+        Storage::fake('public');
+
+        $admin = User::where('role', 'Admin Sekretariat')->firstOrFail();
+        $this->actingAs($admin);
+
+        DecisionLetterNumber::create([
+            'unit_code' => 'SET-MRP',
+            'sequence' => 1,
+            'year' => (int) now()->format('Y'),
+            'number' => 'SK/001/SET-MRP/'.now()->format('Y'),
+            'title' => 'SK pembanding nomor awal',
+            'decision_date' => now()->subDays(2)->toDateString(),
+            'status' => 'Dipakai',
+            'created_by' => $admin->id,
+        ]);
+        DecisionLetterNumber::create([
+            'unit_code' => 'SET-MRP',
+            'sequence' => 3,
+            'year' => (int) now()->format('Y'),
+            'number' => 'SK/003/SET-MRP/'.now()->format('Y'),
+            'title' => 'SK pembanding nomor lompat',
+            'decision_date' => now()->subDay()->toDateString(),
+            'status' => 'Dipesan',
+            'created_by' => $admin->id,
+        ]);
+
+        $this->get('/penomoran-sk')
+            ->assertOk()
+            ->assertSee('Penomoran Surat Keputusan');
+
+        Livewire::test('sk-numbering-page')
+            ->set('unitCode', 'SET-MRP')
+            ->set('year', (int) now()->format('Y'))
+            ->call('openNumberModal')
+            ->assertSet('showNumberModal', true)
+            ->assertSee('SK/002/SET-MRP/'.now()->format('Y'))
+            ->set('sequenceOverride', '2')
+            ->set('title', 'Penetapan panitia kerja')
+            ->set('decisionDate', now()->toDateString())
+            ->set('status', 'Dipesan')
+            ->set('notes', 'Dicatat dari halaman penomoran SK')
+            ->set('decisionFile', UploadedFile::fake()->create('sk-panitia.pdf', 96, 'application/pdf'))
+            ->call('saveNumber')
+            ->assertHasNoErrors();
+
+        $record = DecisionLetterNumber::where('number', 'SK/002/SET-MRP/'.now()->format('Y'))->firstOrFail();
+
+        $this->assertDatabaseHas('decision_letter_numbers', [
+            'unit_code' => 'SET-MRP',
+            'sequence' => 2,
+            'year' => (int) now()->format('Y'),
+            'number' => 'SK/002/SET-MRP/'.now()->format('Y'),
+            'title' => 'Penetapan panitia kerja',
+            'status' => 'Dipesan',
+            'file_original_name' => 'sk-panitia.pdf',
+            'created_by' => $admin->id,
+        ]);
+
+        Storage::disk('public')->assertExists($record->file_path);
+        $this->get(route('sk-numbering.file.review', $record))->assertOk();
+        $this->get(route('sk-numbering.file.download', $record))
+            ->assertOk()
+            ->assertHeader('content-disposition');
+    }
+
+    public function test_sk_numbering_year_can_be_disabled_from_number_format(): void
+    {
+        $admin = User::where('role', 'Admin Sekretariat')->firstOrFail();
+        $this->actingAs($admin);
+
+        Livewire::test('sk-numbering-page')
+            ->set('unitCode', 'SET-MRP')
+            ->set('includeYear', false)
+            ->call('openNumberModal')
+            ->assertSet('showNumberModal', true)
+            ->assertSee('SK/001/SET-MRP')
+            ->assertDontSee('SK/001/SET-MRP/'.now()->format('Y'))
+            ->set('title', 'SK tanpa komponen tahun')
+            ->set('decisionDate', now()->toDateString())
+            ->call('saveNumber')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseHas('decision_letter_numbers', [
+            'unit_code' => 'SET-MRP',
+            'sequence' => 1,
+            'year' => (int) now()->format('Y'),
+            'number' => 'SK/001/SET-MRP',
+            'title' => 'SK tanpa komponen tahun',
+        ]);
+        $this->assertFalse(AppSetting::getValue('sk_numbering')['include_year']);
+    }
+
+    public function test_sk_numbering_classification_code_can_be_edited(): void
+    {
+        $admin = User::where('role', 'Admin Sekretariat')->firstOrFail();
+        $this->actingAs($admin);
+
+        Livewire::test('sk-numbering-page')
+            ->call('openNumberModal')
+            ->set('classificationCode', '180.1')
+            ->assertSee('180.1/001/SET-MRP/'.now()->format('Y'))
+            ->set('title', 'SK dengan kode klasifikasi khusus')
+            ->set('decisionDate', now()->toDateString())
+            ->call('saveNumber')
+            ->assertHasNoErrors();
+
+        $this->assertDatabaseHas('decision_letter_numbers', [
+            'classification_code' => '180.1',
+            'sequence' => 1,
+            'number' => '180.1/001/SET-MRP/'.now()->format('Y'),
+            'title' => 'SK dengan kode klasifikasi khusus',
+        ]);
+        $this->assertSame('180.1', AppSetting::getValue('sk_numbering')['classification_code']);
+    }
+
+    public function test_sk_numbering_page_can_detail_edit_and_delete_number(): void
+    {
+        Storage::fake('public');
+
+        $admin = User::where('role', 'Admin Sekretariat')->firstOrFail();
+        $this->actingAs($admin);
+        Storage::disk('public')->put('file-sk/sk-uji.pdf', 'File SK uji');
+
+        $record = DecisionLetterNumber::create([
+            'unit_code' => 'SET-MRP',
+            'sequence' => 7,
+            'year' => (int) now()->format('Y'),
+            'number' => 'SK/007/SET-MRP/'.now()->format('Y'),
+            'title' => 'SK untuk uji aksi',
+            'decision_date' => now()->toDateString(),
+            'status' => 'Dipesan',
+            'notes' => 'Catatan awal SK',
+            'file_path' => 'file-sk/sk-uji.pdf',
+            'file_original_name' => 'sk-uji.pdf',
+            'file_mime_type' => 'application/pdf',
+            'file_size' => 120,
+            'created_by' => $admin->id,
+        ]);
+
+        Livewire::test('sk-numbering-page')
+            ->call('openDetailModal', $record->id)
+            ->assertSet('showDetailModal', true)
+            ->assertSee('Detail SK')
+            ->assertSee('Buka File SK')
+            ->call('openEditModal', $record->id)
+            ->assertSet('showNumberModal', true)
+            ->assertSet('editingRecordId', $record->id)
+            ->set('title', 'SK untuk uji aksi diperbarui')
+            ->set('status', 'Dipakai')
+            ->set('notes', 'Catatan diperbarui tanpa upload file baru')
+            ->call('saveNumber')
+            ->assertHasNoErrors()
+            ->assertSet('showNumberModal', false);
+
+        $this->assertDatabaseHas('decision_letter_numbers', [
+            'id' => $record->id,
+            'title' => 'SK untuk uji aksi diperbarui',
+            'status' => 'Dipakai',
+            'file_path' => 'file-sk/sk-uji.pdf',
+        ]);
+        Storage::disk('public')->assertExists('file-sk/sk-uji.pdf');
+
+        Livewire::test('sk-numbering-page')
+            ->call('deleteNumber', $record->id);
+
+        $this->assertDatabaseMissing('decision_letter_numbers', [
+            'id' => $record->id,
+        ]);
+        Storage::disk('public')->assertMissing('file-sk/sk-uji.pdf');
+    }
+
+    public function test_sk_numbering_page_requires_admin_role(): void
+    {
+        $this->actingAs(User::where('role', 'Staf Sekretariat')->first());
+
+        $this->get('/penomoran-sk')->assertForbidden();
+    }
+
+    public function test_dashboard_keeps_number_monitoring_available_without_header_shortcut(): void
     {
         $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
 
         Livewire::test('dashboard')
-            ->assertSee('Monitoring Surat');
+            ->assertSee('Dasbor Persuratan')
+            ->assertDontSee('Monitoring Surat');
 
-        Livewire::withQueryParams(['tab' => 'monitoring-nomor'])
-            ->test('settings')
-            ->assertSet('activeSettingsTab', 'monitoring-nomor')
-            ->assertSee('Monitoring Nomor Surat Keluar');
+        $this->get('/monitoring-nomor-surat')
+            ->assertOk()
+            ->assertSee('Monitoring Nomor Surat');
     }
 
     public function test_available_number_recommendation_can_prefill_outgoing_letter_form(): void
@@ -1319,6 +1719,61 @@ class ExampleTest extends TestCase
             ->assertHeader('content-disposition');
     }
 
+    public function test_department_head_file_access_follows_disposition_assignment(): void
+    {
+        Storage::fake('public');
+
+        $departmentHead = User::where('role', 'Kepala Bagian')->firstOrFail();
+        Storage::disk('public')->put('dokumen-surat/akses-kabag.pdf', 'Dokumen kabag');
+        Storage::disk('public')->put('lampiran-surat/akses-kabag.pdf', 'Lampiran kabag');
+        Storage::disk('public')->put('file-disposisi/akses-kabag.pdf', 'Disposisi kabag');
+
+        $letter = Letter::create([
+            'type' => 'Masuk',
+            'unit_code' => 'SET-MRP',
+            'number' => 'SM/SET-MRP/AKSES-KABAG',
+            'subject' => 'Surat akses kepala bagian',
+            'external_party' => 'Bagian Umum',
+            'letter_date' => now()->toDateString(),
+            'file_path' => 'dokumen-surat/akses-kabag.pdf',
+            'status' => 'Disposisi Pimpinan',
+        ]);
+        $attachment = $letter->attachments()->create([
+            'category' => 'Lampiran',
+            'original_name' => 'akses-kabag.pdf',
+            'file_path' => 'lampiran-surat/akses-kabag.pdf',
+            'mime_type' => 'application/pdf',
+            'size' => 120,
+        ]);
+        $disposition = $letter->dispositions()->create([
+            'sender_name' => 'Pimpinan MRP Papua Tengah',
+            'recipient_name' => $departmentHead->name,
+            'instruction' => 'Tindak lanjut sesuai bidang.',
+            'status' => 'Belum Dibaca',
+            'scan_path' => 'file-disposisi/akses-kabag.pdf',
+            'scan_original_name' => 'akses-kabag.pdf',
+        ]);
+
+        $this->actingAs($departmentHead);
+        $this->get(route('letters.document.review', $letter))->assertOk();
+        $this->get(route('letter-attachments.review', $attachment))->assertOk();
+        $this->get(route('dispositions.scan.review', $disposition))->assertOk();
+
+        Storage::disk('public')->put('dokumen-surat/tidak-ditugaskan.pdf', 'Dokumen lain');
+        $unassignedLetter = Letter::create([
+            'type' => 'Masuk',
+            'unit_code' => 'SET-MRP',
+            'number' => 'SM/SET-MRP/TIDAK-DITUGASKAN',
+            'subject' => 'Surat tanpa disposisi ke kepala bagian',
+            'external_party' => 'Bagian Umum',
+            'letter_date' => now()->toDateString(),
+            'file_path' => 'dokumen-surat/tidak-ditugaskan.pdf',
+            'status' => 'Baru',
+        ]);
+
+        $this->get(route('letters.document.review', $unassignedLetter))->assertForbidden();
+    }
+
     public function test_letter_detail_opens_in_modal(): void
     {
         $this->actingAs(User::where('role', 'Admin Sekretariat')->first());
@@ -1362,6 +1817,77 @@ class ExampleTest extends TestCase
             ->assertSee('Timeline Disposisi')
             ->assertSee('Pimpinan MRP Papua Tengah ke Kepala Bagian Umum')
             ->assertSee('Kepala Bagian Umum ke Staf Administrasi');
+    }
+
+    public function test_tracking_page_shows_letter_status_and_timeline(): void
+    {
+        $staff = User::where('role', 'Staf Sekretariat')->firstOrFail();
+        $admin = User::where('role', 'Admin Sekretariat')->firstOrFail();
+        $this->actingAs($staff);
+
+        $letter = Letter::where('type', 'Masuk')->firstOrFail();
+        $letter->update([
+            'number' => 'TRK/001/SET-MRP/'.now()->format('Y'),
+            'subject' => 'Surat untuk pelacakan status',
+            'status' => 'Diproses',
+        ]);
+        $parent = $letter->dispositions()->create([
+            'sender_name' => 'Pimpinan MRP Papua Tengah',
+            'recipient_name' => 'Kepala Bagian Umum',
+            'instruction' => 'Telusuri dan koordinasikan tindak lanjut.',
+            'status' => 'Diproses',
+        ]);
+        $letter->dispositions()->create([
+            'parent_id' => $parent->id,
+            'sender_name' => 'Kepala Bagian Umum',
+            'recipient_name' => 'Staf Administrasi',
+            'instruction' => 'Catat progres pelacakan.',
+            'status' => 'Belum Dibaca',
+        ]);
+        ActivityLog::create([
+            'user_id' => $admin->id,
+            'action' => 'letter.created',
+            'subject_type' => $letter->getMorphClass(),
+            'subject_id' => $letter->id,
+            'description' => 'Surat dicatat oleh admin.',
+            'created_at' => now()->subMinutes(30),
+            'updated_at' => now()->subMinutes(30),
+        ]);
+        ActivityLog::create([
+            'user_id' => $staff->id,
+            'action' => 'disposition.status_updated',
+            'subject_type' => $parent->getMorphClass(),
+            'subject_id' => $parent->id,
+            'description' => 'Status disposisi diperbarui.',
+            'created_at' => now()->subMinutes(10),
+            'updated_at' => now()->subMinutes(10),
+        ]);
+
+        $this->get('/tracking-surat')
+            ->assertOk()
+            ->assertSee('Tracking Surat');
+
+        Livewire::test('letter-tracking-page')
+            ->set('search', 'TRK/001')
+            ->call('selectLetter', $letter->id)
+            ->assertSet('showDetailModal', true)
+            ->assertSee('Surat untuk pelacakan status')
+            ->assertSee('Tutup')
+            ->assertSee('Posisi Surat')
+            ->assertSee('Timeline Disposisi')
+            ->assertSee('Riwayat Aksi')
+            ->assertSee('Surat dicatat oleh admin.')
+            ->assertSee('Status disposisi diperbarui.')
+            ->assertSee('Oleh '.$admin->name)
+            ->assertSee('Oleh '.$staff->name)
+            ->assertSee('Diproses')
+            ->assertSee('Pimpinan MRP Papua Tengah ke Kepala Bagian Umum')
+            ->assertSee('Kepala Bagian Umum ke Staf Administrasi');
+    }
+
+    public function test_tracking_page_requires_login(): void
+    {
+        $this->get('/tracking-surat')->assertRedirect(route('login'));
     }
 
     public function test_letter_table_is_paginated(): void
@@ -1525,6 +2051,57 @@ class ExampleTest extends TestCase
         ]);
     }
 
+    public function test_dashboard_disposition_can_upload_disposition_file(): void
+    {
+        Storage::fake('public');
+
+        $this->actingAs(User::where('role', 'Pimpinan MRP')->first());
+
+        $letter = Letter::where('type', 'Masuk')->firstOrFail();
+        $recipient = DispositionRecipient::where('is_active', true)->firstOrFail();
+        $file = UploadedFile::fake()->create('file-disposisi.pdf', 80, 'application/pdf');
+
+        Livewire::test('dashboard')
+            ->call('openDispositionForm', $letter->id)
+            ->set('recipientId', $recipient->id)
+            ->set('instruction', 'Mohon ditindaklanjuti sesuai file disposisi.')
+            ->set('dispositionScan', $file)
+            ->call('saveDisposition');
+
+        $disposition = $letter->fresh()->dispositions()->latest()->firstOrFail();
+
+        $this->assertDatabaseHas('dispositions', [
+            'id' => $disposition->id,
+            'input_method' => 'Upload File Disposisi',
+            'scan_original_name' => 'file-disposisi.pdf',
+        ]);
+
+        Storage::disk('public')->assertExists($disposition->scan_path);
+    }
+
+    public function test_dashboard_disposition_can_send_to_multiple_recipients(): void
+    {
+        $this->actingAs(User::where('role', 'Pimpinan MRP')->first());
+
+        $letter = Letter::where('type', 'Masuk')->firstOrFail();
+        $recipients = DispositionRecipient::where('is_active', true)->take(2)->get();
+
+        Livewire::test('dashboard')
+            ->call('openDispositionForm', $letter->id)
+            ->set('recipientIds', $recipients->pluck('id')->all())
+            ->set('instruction', 'Mohon ditindaklanjuti bersama.')
+            ->call('saveDisposition');
+
+        foreach ($recipients as $recipient) {
+            $this->assertDatabaseHas('dispositions', [
+                'letter_id' => $letter->id,
+                'disposition_recipient_id' => $recipient->id,
+                'recipient_name' => $recipient->name,
+                'instruction' => 'Mohon ditindaklanjuti bersama.',
+            ]);
+        }
+    }
+
     public function test_department_head_can_update_own_disposition_status(): void
     {
         $departmentHead = User::where('role', 'Kepala Bagian')->firstOrFail();
@@ -1544,6 +2121,51 @@ class ExampleTest extends TestCase
         $this->assertDatabaseHas('dispositions', [
             'id' => $disposition->id,
             'status' => 'Diproses',
+        ]);
+    }
+
+    public function test_incoming_letter_status_follows_all_disposition_statuses(): void
+    {
+        $departmentHead = User::where('role', 'Kepala Bagian')->firstOrFail();
+        $this->actingAs($departmentHead);
+
+        $letter = Letter::create([
+            'type' => 'Masuk',
+            'unit_code' => 'SET-MRP',
+            'number' => 'SYNC-DISPOSISI/001',
+            'subject' => 'Surat sinkron disposisi',
+            'external_party' => 'Unit Penguji',
+            'letter_date' => now()->toDateString(),
+            'received_date' => now()->toDateString(),
+            'status' => 'Disposisi Pimpinan',
+        ]);
+        $first = $letter->dispositions()->create([
+            'sender_name' => 'Pimpinan',
+            'recipient_name' => $departmentHead->name,
+            'instruction' => 'Tindak lanjut pertama.',
+            'status' => 'Belum Dibaca',
+        ]);
+        $second = $letter->dispositions()->create([
+            'sender_name' => 'Pimpinan',
+            'recipient_name' => $departmentHead->name,
+            'instruction' => 'Tindak lanjut kedua.',
+            'status' => 'Belum Dibaca',
+        ]);
+
+        Livewire::test('department-head-page')
+            ->call('updateDispositionStatus', $first->id, 'Selesai');
+
+        $this->assertDatabaseHas('letters', [
+            'id' => $letter->id,
+            'status' => 'Diproses',
+        ]);
+
+        Livewire::test('department-head-page')
+            ->call('updateDispositionStatus', $second->id, 'Selesai');
+
+        $this->assertDatabaseHas('letters', [
+            'id' => $letter->id,
+            'status' => 'Selesai',
         ]);
     }
 
@@ -1569,8 +2191,135 @@ class ExampleTest extends TestCase
 
         $this->assertDatabaseHas('letters', [
             'id' => $letter->id,
-            'status' => 'Disposisi',
+            'status' => 'Disposisi Pimpinan',
         ]);
+    }
+
+    public function test_leadership_disposition_can_upload_disposition_file(): void
+    {
+        Storage::fake('public');
+
+        $this->actingAs(User::where('role', 'Pimpinan MRP')->firstOrFail());
+
+        $letter = Letter::where('type', 'Masuk')->firstOrFail();
+        $recipient = DispositionRecipient::where('name', 'Kepala Bagian Umum')->firstOrFail();
+        $file = UploadedFile::fake()->create('disposisi-pimpinan.pdf', 96, 'application/pdf');
+
+        Livewire::test('leadership-page')
+            ->call('openDispositionModal', $letter->id)
+            ->set('recipientId', $recipient->id)
+            ->set('instruction', 'Telaah dan tindaklanjuti sesuai file disposisi.')
+            ->set('dispositionScan', $file)
+            ->call('saveDisposition');
+
+        $disposition = $letter->fresh()->dispositions()->latest()->firstOrFail();
+
+        $this->assertDatabaseHas('dispositions', [
+            'id' => $disposition->id,
+            'input_method' => 'Upload File Disposisi',
+            'scan_original_name' => 'disposisi-pimpinan.pdf',
+        ]);
+
+        Storage::disk('public')->assertExists($disposition->scan_path);
+    }
+
+    public function test_leadership_disposition_can_send_to_multiple_department_heads(): void
+    {
+        $this->actingAs(User::where('role', 'Pimpinan MRP')->firstOrFail());
+
+        $letter = Letter::where('type', 'Masuk')->firstOrFail();
+        $first = DispositionRecipient::where('name', 'Kepala Bagian Umum')->firstOrFail();
+        $second = DispositionRecipient::create([
+            'name' => 'Kepala Bagian Persidangan',
+            'position' => 'Kepala Bagian',
+            'unit' => 'Persidangan',
+            'is_active' => true,
+        ]);
+
+        Livewire::test('leadership-page')
+            ->call('openDispositionModal', $letter->id)
+            ->set('recipientIds', [$first->id, $second->id])
+            ->set('instruction', 'Koordinasikan tindak lanjut lintas bagian.')
+            ->call('saveDisposition');
+
+        foreach ([$first, $second] as $recipient) {
+            $this->assertDatabaseHas('dispositions', [
+                'letter_id' => $letter->id,
+                'disposition_recipient_id' => $recipient->id,
+                'recipient_name' => $recipient->name,
+                'instruction' => 'Koordinasikan tindak lanjut lintas bagian.',
+            ]);
+        }
+    }
+
+    public function test_leadership_can_create_standalone_disposition(): void
+    {
+        $this->actingAs(User::where('role', 'Pimpinan MRP')->firstOrFail());
+
+        $recipient = DispositionRecipient::where('name', 'Kepala Bagian Umum')->firstOrFail();
+
+        Livewire::test('leadership-page')
+            ->call('openStandaloneDispositionModal')
+            ->assertSet('selectedLetterId', null)
+            ->assertSet('showDispositionModal', true)
+            ->set('recipientIds', [$recipient->id])
+            ->set('instruction', 'Arahan langsung pimpinan tanpa surat masuk.')
+            ->call('saveDisposition')
+            ->assertHasNoErrors()
+            ->assertSet('showDispositionModal', false);
+
+        $this->assertDatabaseHas('dispositions', [
+            'letter_id' => null,
+            'recipient_name' => 'Kepala Bagian Umum',
+            'disposition_recipient_id' => $recipient->id,
+            'instruction' => 'Arahan langsung pimpinan tanpa surat masuk.',
+        ]);
+
+        $this->actingAs(User::where('role', 'Admin Sekretariat')->firstOrFail());
+
+        Livewire::test('department-head-page')
+            ->assertSee('Disposisi Mandiri')
+            ->assertSee('Arahan langsung pimpinan tanpa surat masuk.');
+    }
+
+    public function test_personal_secretary_can_input_scanned_leader_disposition(): void
+    {
+        Storage::fake('public');
+
+        $secretary = User::where('role', 'Sekretaris Pribadi')->firstOrFail();
+        $this->actingAs($secretary);
+
+        $letter = Letter::where('type', 'Masuk')->where('status', 'Baru')->firstOrFail();
+        $recipient = DispositionRecipient::where('name', 'Kepala Bagian Umum')->firstOrFail();
+        $scan = UploadedFile::fake()->create('disposisi-pimpinan.pdf', 120, 'application/pdf');
+
+        Livewire::test('leadership-page')
+            ->call('openDispositionModal', $letter->id)
+            ->set('recipientId', $recipient->id)
+            ->set('instruction', 'Mohon segera ditindaklanjuti sesuai catatan pimpinan.')
+            ->set('dispositionScan', $scan)
+            ->call('saveDisposition');
+
+        $disposition = $letter->fresh()->dispositions()->latest()->firstOrFail();
+
+        $this->assertDatabaseHas('dispositions', [
+            'id' => $disposition->id,
+            'letter_id' => $letter->id,
+            'recipient_name' => 'Kepala Bagian Umum',
+            'disposition_recipient_id' => $recipient->id,
+            'input_method' => 'Upload File Disposisi',
+            'input_by_name' => $secretary->name,
+            'input_by_role' => 'Sekretaris Pribadi',
+            'scan_original_name' => 'disposisi-pimpinan.pdf',
+            'status' => 'Belum Dibaca',
+        ]);
+
+        $this->assertDatabaseHas('letters', [
+            'id' => $letter->id,
+            'status' => 'Disposisi Pimpinan',
+        ]);
+
+        Storage::disk('public')->assertExists($disposition->scan_path);
     }
 
     public function test_leadership_page_letter_detail_modal_shows_leader_actions(): void
@@ -1585,6 +2334,7 @@ class ExampleTest extends TestCase
             ->assertSet('showDetailModal', true)
             ->assertSee('Aksi Pimpinan')
             ->assertSee('Disposisi')
+            ->assertDontSee('Input Scan Disposisi')
             ->assertDontSee('Edit Surat')
             ->assertDontSee('Hapus Surat')
             ->call('openDispositionModal', $letter->id)

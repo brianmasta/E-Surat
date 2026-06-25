@@ -100,7 +100,11 @@ new class extends Component
 
     public ?int $recipientId = null;
 
+    public array $recipientIds = [];
+
     public string $instruction = '';
+
+    public $dispositionScan = null;
 
     public ?int $revisionApprovalId = null;
 
@@ -788,10 +792,16 @@ new class extends Component
     {
         abort_unless($this->canDispose(), 403);
 
+        $letter = Letter::findOrFail($letterId);
+        abort_unless($letter->canReceiveDisposition(), 422);
+
         $this->resetValidation();
         $this->selectedLetterId = $letterId;
-        $this->recipientId = $this->dispositionRecipients()->first()?->id;
+        $firstRecipientId = $this->dispositionRecipients()->first()?->id;
+        $this->recipientId = null;
+        $this->recipientIds = $firstRecipientId ? [$firstRecipientId] : [];
         $this->instruction = '';
+        $this->dispositionScan = null;
         $this->showDetailModal = false;
         $this->showDispositionForm = true;
     }
@@ -801,33 +811,85 @@ new class extends Component
         abort_unless($this->canDispose(), 403);
 
         $validated = $this->validate([
-            'recipientId' => ['required', Rule::exists('disposition_recipients', 'id')->where('is_active', true)],
+            'recipientIds' => ['nullable', 'array'],
+            'recipientIds.*' => [Rule::exists('disposition_recipients', 'id')->where('is_active', true)],
             'instruction' => ['required', 'string', 'max:1000'],
+            'dispositionScan' => ['nullable', 'file', 'mimes:pdf,jpg,jpeg,png', 'max:5120'],
         ]);
 
         $letter = $this->selectedLetter();
-        $recipient = DispositionRecipient::find($validated['recipientId']);
-        if (! $letter || ! $recipient) {
+        $recipientIds = $this->selectedRecipientIds();
+        if (! $letter) {
             return;
         }
 
-        $disposition = $letter->dispositions()->create([
-            'sender_name' => 'Pimpinan',
-            'recipient_name' => $recipient->name,
-            'disposition_recipient_id' => $recipient->id,
-            'instruction' => $validated['instruction'],
-            'status' => 'Belum Dibaca',
-        ]);
+        if (! $letter->canReceiveDisposition()) {
+            $this->addError('selectedLetterId', 'Disposisi hanya bisa dibuat untuk surat masuk.');
 
-        $letter->update(['status' => 'Disposisi']);
-        ActivityLog::record(
-            'disposition.created',
-            'Disposisi dikirim ke '.$recipient->name.' untuk surat '.$letter->number,
-            $disposition,
-            ['letter_id' => $letter->id],
-        );
+            return;
+        }
+
+        if ($recipientIds === []) {
+            $this->addError('recipientIds', 'Pilih minimal satu penerima disposisi.');
+
+            return;
+        }
+
+        $recipients = DispositionRecipient::query()
+            ->where('is_active', true)
+            ->whereIn('id', $recipientIds)
+            ->get();
+
+        $scanData = [];
+
+        if ($this->dispositionScan) {
+            $path = $this->dispositionScan->store('file-disposisi', 'public');
+            $scanData = [
+                'input_method' => 'Upload File Disposisi',
+                'scan_path' => $path,
+                'scan_original_name' => $this->dispositionScan->getClientOriginalName(),
+                'scan_mime_type' => $this->dispositionScan->getMimeType(),
+                'scan_size' => $this->dispositionScan->getSize(),
+            ];
+        }
+
+        foreach ($recipients as $recipient) {
+            $disposition = $letter->dispositions()->create([
+                'sender_name' => 'Pimpinan',
+                'recipient_name' => $recipient->name,
+                'disposition_recipient_id' => $recipient->id,
+                'instruction' => $validated['instruction'],
+                'status' => 'Belum Dibaca',
+            ] + $scanData);
+
+            ActivityLog::record(
+                'disposition.created',
+                'Disposisi dikirim ke '.$recipient->name.' untuk surat '.$letter->number,
+                $disposition,
+                ['letter_id' => $letter->id],
+            );
+        }
+
+        $letter->syncDispositionStatus();
         $this->showDispositionForm = false;
+        $this->dispositionScan = null;
         $this->dispatch('notify', message: 'Disposisi terkirim ke staf terkait.');
+    }
+
+    public function selectedRecipientIds(): array
+    {
+        $ids = collect($this->recipientIds)
+            ->filter(fn ($id) => $id !== null && $id !== '')
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        if ($this->recipientId) {
+            return [(int) $this->recipientId];
+        }
+
+        return $ids;
     }
 
     public function updateStatus(int $letterId, string $status): void
@@ -836,6 +898,14 @@ new class extends Component
 
         $letter = Letter::findOrFail($letterId);
         $letter->update(['status' => $status]);
+
+        if ($letter->canReceiveDisposition() && $letter->dispositions()->exists()) {
+            if ($status === 'Selesai') {
+                $letter->dispositions()->where('status', '!=', 'Selesai')->update(['status' => 'Selesai']);
+            }
+
+            $letter->syncDispositionStatus();
+        }
 
         ActivityLog::record('letter.status_updated', 'Status surat '.$letter->number.' diperbarui menjadi '.$status.'.', $letter);
         $this->dispatch('notify', message: 'Status surat diperbarui.');
@@ -968,7 +1038,7 @@ new class extends Component
     {
         return match ($status) {
             'Baru' => 'bg-rose-100 text-rose-700 ring-rose-200',
-            'Disposisi' => 'bg-amber-100 text-amber-700 ring-amber-200',
+            'Disposisi', 'Disposisi Pimpinan' => 'bg-amber-100 text-amber-700 ring-amber-200',
             'Diproses' => 'bg-indigo-100 text-indigo-700 ring-indigo-200',
             'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan' => 'bg-sky-100 text-sky-700 ring-sky-200',
             'Disetujui', 'Ditandatangani' => 'bg-emerald-100 text-emerald-700 ring-emerald-200',
@@ -1041,7 +1111,7 @@ new class extends Component
 
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
-            <div class="grid h-11 w-11 place-items-center rounded-lg bg-teal-100 font-bold text-teal-800">{{ $agencyProfile['short_name'] }}</div>
+            <x-app-logo class="h-11 w-11" />
             <div>
                 <div class="font-semibold">{{ $agencyProfile['app_name'] }}</div>
                 <div class="text-sm text-slate-400">{{ $agencyProfile['name'] }}</div>
@@ -1051,36 +1121,53 @@ new class extends Component
         <nav class="mt-8 flex gap-2 overflow-x-auto lg:grid lg:overflow-visible">
             <button type="button"
                     wire:click="setCombinedFilter('Semua', 'Semua')"
-                    class="rounded-lg px-3 py-2 text-left text-sm font-semibold transition {{ $typeFilter === 'Semua' && $unitFilter === 'Semua' ? 'bg-white/10 text-white' : 'text-slate-300 hover:bg-white/5' }}">
+                    class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold transition {{ $typeFilter === 'Semua' && $unitFilter === 'Semua' ? 'bg-white/10 text-white' : 'text-slate-300 hover:bg-white/5' }}">
+                <x-icon name="dashboard" class="h-4 w-4" />
                 Dasbor
             </button>
             <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
-                <span>Tugas Saya</span>
+                <span class="inline-flex items-center gap-2"><x-icon name="task" class="h-4 w-4" />Tugas Saya</span>
                 @if ($taskCount > 0)
                     <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
                 @endif
+            </a>
+            <a href="{{ route('tracking') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <x-icon name="route" class="h-4 w-4" />
+                Pelacakan Surat
             </a>
 
             @if ($this->canDispose())
                 <button type="button"
                         wire:click="openDispositionForm({{ $selectedLetterId ?? 0 }})"
                         @disabled(! $selectedLetterId)
-                        class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50">
+                        class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50">
+                    <x-icon name="send" class="h-4 w-4" />
                     Disposisi
                 </button>
             @endif
-            @if ($currentUser?->isAdmin() || $currentUser?->isLeader())
-                <a href="{{ route('leadership') }}" class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+            @if ($currentUser?->isAdmin() || $currentUser?->isLeader() || $currentUser?->isPersonalSecretary())
+                <a href="{{ route('leadership') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    <x-icon name="send" class="h-4 w-4" />
                     Halaman Pimpinan
                 </a>
             @endif
             @if ($currentUser?->isAdmin() || $currentUser?->isDepartmentHead())
-                <a href="{{ route('department-head') }}" class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <a href="{{ route('department-head') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    <x-icon name="users" class="h-4 w-4" />
                     Halaman Kepala Bagian
                 </a>
             @endif
             @if ($this->canManageSettings())
-                <a href="{{ route('settings') }}" class="rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <a href="{{ route('number-monitor') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    <x-icon name="list-numbered" class="h-4 w-4" />
+                    Monitoring Nomor
+                </a>
+                <a href="{{ route('sk-numbering') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    <x-icon name="gavel" class="h-4 w-4" />
+                    Penomoran SK
+                </a>
+                <a href="{{ route('settings') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    <x-icon name="settings" class="h-4 w-4" />
                     Setting
                 </a>
             @endif
@@ -1096,43 +1183,46 @@ new class extends Component
     </aside>
 
     <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
-        <header class="sticky top-0 z-10 -mx-4 flex flex-col gap-4 border-b border-slate-200 bg-slate-100/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 xl:flex-row xl:items-start xl:justify-between">
-            <div>
-                <p class="text-xs font-bold uppercase text-teal-700">    {{ \Carbon\Carbon::now()->translatedFormat('l, j F Y') }}</p>
-                <h1 class="mt-1 text-3xl font-bold tracking-normal text-slate-950">Dasbor Persuratan {{ $agencyProfile['short_name'] }}</h1>
-                <p class="mt-2 max-w-2xl text-sm text-slate-600">Pengelolaan surat {{ $agencyProfile['name'] }}.</p>
-            </div>
-            <div class="flex flex-col gap-2 sm:flex-row xl:justify-end">
-                <label class="flex min-h-11 w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 shadow-sm sm:w-96">
-                    <span class="text-slate-400">⌕</span>
-                    <input wire:model.live.debounce.250ms="search"
-                           type="search"
-                           class="w-full border-0 bg-transparent text-sm outline-none"
-                           placeholder="Cari nomor, agenda, perihal, pihak luar...">
-                </label>
-                @if ($this->canManageLetters())
-                    @php($actionUnit = $unitFilter === 'Semua' ? $this->defaultUnitCode() : $unitFilter)
-                    <a href="{{ route('settings', ['tab' => 'monitoring-nomor']) }}"
-                       class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
-                        Monitoring Surat
-                    </a>
-                    <button type="button"
-                            wire:click="openLetterForm('Masuk', '{{ $actionUnit }}')"
-                            class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
-                        + Input Surat Masuk
-                    </button>
-                    <button type="button"
-                            wire:click="openLetterForm('Keluar', '{{ $actionUnit }}')"
-                            class="inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-teal-800">
-                        + Input Surat Keluar
-                    </button>
-                @endif
-                <form method="POST" action="{{ route('logout') }}">
-                    @csrf
-                    <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
-                        Logout
-                    </button>
-                </form>
+        <header class="sticky top-0 z-10 -mx-4 border-b border-slate-200 bg-slate-100/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
+            <div class="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                <div class="min-w-0">
+                    <p class="text-[11px] font-bold uppercase text-teal-700">{{ \Carbon\Carbon::now()->translatedFormat('l, j F Y') }}</p>
+                    <h1 class="mt-0.5 text-xl font-bold leading-tight tracking-normal text-slate-950 sm:text-2xl">Dasbor Persuratan {{ $agencyProfile['short_name'] }}</h1>
+                    <p class="mt-1 max-w-xl text-xs text-slate-600">Pengelolaan surat {{ $agencyProfile['name'] }}.</p>
+                </div>
+                <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center xl:justify-end">
+                    <label class="flex h-10 w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 shadow-sm sm:w-72 lg:w-80">
+                        <x-icon name="search" class="h-4 w-4 text-slate-400" />
+                        <input wire:model.live.debounce.250ms="search"
+                               type="search"
+                               class="min-w-0 flex-1 border-0 bg-transparent text-sm outline-none"
+                               placeholder="Cari nomor, agenda, perihal, pihak luar...">
+                    </label>
+                    <div class="flex flex-wrap gap-2">
+                        @if ($this->canManageLetters())
+                            @php($actionUnit = $unitFilter === 'Semua' ? $this->defaultUnitCode() : $unitFilter)
+                            <button type="button"
+                                    wire:click="openLetterForm('Masuk', '{{ $actionUnit }}')"
+                                    class="inline-flex h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
+                                <x-icon name="inbox" class="mr-2 h-4 w-4" />
+                                Input Surat Masuk
+                            </button>
+                            <button type="button"
+                                    wire:click="openLetterForm('Keluar', '{{ $actionUnit }}')"
+                                    class="inline-flex h-10 items-center justify-center rounded-lg bg-teal-700 px-3 text-sm font-bold text-white shadow-sm hover:bg-teal-800">
+                                <x-icon name="outbox" class="mr-2 h-4 w-4" />
+                                Input Surat Keluar
+                            </button>
+                        @endif
+                        <form method="POST" action="{{ route('logout') }}">
+                            @csrf
+                            <button type="submit" class="inline-flex h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
+                                <x-icon name="logout" class="mr-2 h-4 w-4" />
+                                Logout
+                            </button>
+                        </form>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -1203,7 +1293,7 @@ new class extends Component
                     <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
                         Status
                         <select wire:model.live="statusFilter" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
-                            @foreach (['Semua', 'Baru', 'Disposisi', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Revisi Konsep', 'Selesai'] as $status)
+                            @foreach (['Semua', 'Baru', 'Disposisi Pimpinan', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Revisi Konsep', 'Selesai'] as $status)
                                 <option value="{{ $status }}">{{ $status }}</option>
                             @endforeach
                         </select>
@@ -1319,7 +1409,7 @@ new class extends Component
         </section>
 
         @if ($showDetailModal && $selectedLetter)
-            <div class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
+            <div wire:click.self="$set('showDetailModal', false)" class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
                 <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg bg-white shadow-xl">
                     <div class="flex items-start justify-between gap-4 border-b border-slate-200 p-6">
                         <div>
@@ -1341,11 +1431,11 @@ new class extends Component
                                 </span>
                             @endif
                         </div>
-                        @if ($this->canDispose() || $this->canEditLetters() || $this->canDeleteLetters() || $selectedLetter->file_path || ($selectedLetter->type === 'Keluar' && $selectedLetter->outgoing_body))
+                        @if (($this->canDispose() && $selectedLetter->canReceiveDisposition()) || $this->canEditLetters() || $this->canDeleteLetters() || $selectedLetter->file_path || ($selectedLetter->type === 'Keluar' && $selectedLetter->outgoing_body))
                             <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
                                 <div class="text-sm font-bold text-slate-700">Aksi Surat</div>
                                 <div class="mt-3 flex flex-wrap gap-2">
-                                    @if ($this->canDispose())
+                                    @if ($this->canDispose() && $selectedLetter->canReceiveDisposition())
                                         <button type="button" wire:click="openDispositionForm({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Disposisi</button>
                                     @endif
                                     @if ($this->canEditLetters())
@@ -1612,6 +1702,12 @@ new class extends Component
                                             <span class="inline-flex rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($disposition->status) }}">{{ $disposition->status }}</span>
                                         </div>
                                         <p class="mt-2 text-sm text-slate-600">{{ $disposition->instruction }}</p>
+                                        @if ($disposition->scan_path)
+                                            <div class="mt-3 flex flex-wrap gap-2">
+                                                <a href="{{ route('dispositions.scan.review', $disposition) }}" target="_blank" class="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-bold hover:border-teal-600">Buka Scan Disposisi</a>
+                                                <a href="{{ route('dispositions.scan.download', $disposition) }}" class="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800">Download Scan</a>
+                                            </div>
+                                        @endif
 
                                         @if ($disposition->children->isNotEmpty())
                                             <div class="mt-4 space-y-3 border-l-4 border-teal-700 pl-4">
@@ -1639,7 +1735,7 @@ new class extends Component
                         @if ($this->canUpdateStatus())
                             <div class="flex flex-col gap-2 border-t border-slate-200 pt-5 sm:flex-row sm:justify-end">
                                 <select wire:change="updateStatus({{ $selectedLetter->id }}, $event.target.value)" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
-                                    @foreach (['Baru', 'Disposisi', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Revisi Konsep', 'Selesai'] as $status)
+                                    @foreach (['Baru', 'Disposisi Pimpinan', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Revisi Konsep', 'Selesai'] as $status)
                                         <option value="{{ $status }}" @selected($selectedLetter->status === $status)>{{ $status }}</option>
                                     @endforeach
                                 </select>
@@ -1652,7 +1748,7 @@ new class extends Component
         @endif
 
         @if ($showLetterForm)
-            <div class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
+            <div wire:click.self="$set('showLetterForm', false)" class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
                 <form wire:submit="saveLetter" class="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-lg bg-white p-6 shadow-xl">
                     <div class="flex items-start justify-between gap-4">
                         <div>
@@ -1881,14 +1977,14 @@ new class extends Component
         @endif
 
         @if ($showRevisionModal)
-            <div class="fixed inset-0 z-30 grid place-items-center bg-slate-950/50 p-4">
+            <div wire:click.self="$set('showRevisionModal', false)" class="fixed inset-0 z-30 grid place-items-center bg-slate-950/50 p-4">
                 <form wire:submit="rejectApprovalStep" class="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-lg bg-white p-6 shadow-xl">
                     <div class="flex items-start justify-between gap-4">
                         <div>
                             <p class="text-xs font-bold uppercase text-rose-700">Revisi Konsep Surat</p>
                             <h2 class="mt-1 text-xl font-bold">Tolak / Kembalikan Konsep</h2>
                         </div>
-                        <button type="button" wire:click="$set('showRevisionModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">Ã—</button>
+                        <button type="button" wire:click="$set('showRevisionModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
                     </div>
 
                     <label class="mt-5 grid gap-1 text-sm font-bold text-slate-600">
@@ -1906,7 +2002,7 @@ new class extends Component
         @endif
 
         @if ($showDispositionForm)
-            <div class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
+            <div wire:click.self="$set('showDispositionForm', false)" class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
                 <form wire:submit="saveDisposition" class="w-full max-w-xl rounded-lg bg-white p-6 shadow-xl">
                     <div class="flex items-start justify-between gap-4">
                         <div>
@@ -1919,18 +2015,27 @@ new class extends Component
                     <div class="mt-5 grid gap-4">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Penerima Disposisi
-                            <select wire:model="recipientId" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
-                                <option value="">Pilih penerima</option>
+                            <div class="grid max-h-56 gap-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
                                 @foreach ($dispositionRecipients as $recipient)
-                                    <option value="{{ $recipient->id }}">{{ $recipient->name }}{{ $recipient->position ? ' - '.$recipient->position : '' }}</option>
+                                    <label class="flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" wire:key="dashboard-disposition-recipient-{{ $recipient->id }}">
+                                        <input wire:model="recipientIds" type="checkbox" value="{{ $recipient->id }}" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                                        <span>{{ $recipient->name }}{{ $recipient->position ? ' - '.$recipient->position : '' }}</span>
+                                    </label>
                                 @endforeach
-                            </select>
-                            @error('recipientId') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            </div>
+                            @error('recipientIds') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                            @error('recipientIds.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Instruksi
                             <textarea wire:model="instruction" rows="4" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan instruksi tindak lanjut..."></textarea>
                             @error('instruction') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
+                        </label>
+                        <label class="grid gap-1 text-sm font-bold text-slate-600">
+                            File Disposisi
+                            <input wire:model="dispositionScan" type="file" accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                            <span class="text-xs font-normal text-slate-500">Opsional. Unggah PDF/JPG/PNG jika disposisi memiliki file pendukung.</span>
+                            @error('dispositionScan') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                     </div>
 

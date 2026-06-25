@@ -15,6 +15,13 @@ class Disposition extends Model
         'disposition_recipient_id',
         'instruction',
         'status',
+        'input_method',
+        'input_by_name',
+        'input_by_role',
+        'scan_path',
+        'scan_original_name',
+        'scan_mime_type',
+        'scan_size',
     ];
 
     public function letter(): BelongsTo

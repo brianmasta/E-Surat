@@ -49,6 +49,7 @@ class AppSettingSeeder extends Seeder
         AppSetting::putValue('roles', [
             ['name' => 'Admin Sekretariat', 'description' => 'Mencatat surat, mengunggah dokumen, dan mengelola arsip instansi.'],
             ['name' => 'Pimpinan MRP', 'description' => 'Membaca surat masuk dan mengirim disposisi elektronik.'],
+            ['name' => 'Sekretaris Pribadi', 'description' => 'Menginput scan disposisi fisik dari pimpinan dan meneruskannya ke kepala bagian.'],
             ['name' => 'Kepala Bagian', 'description' => 'Menerima disposisi pimpinan dan memantau tindak lanjut pada unit kerja.'],
             ['name' => 'Staf Sekretariat', 'description' => 'Menerima instruksi, memproses surat, dan memperbarui status.'],
         ]);

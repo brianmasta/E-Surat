@@ -25,6 +25,11 @@ class UserSeeder extends Seeder
                 'email' => 'pimpinan@mrp-papuatengah.test',
             ],
             [
+                'name' => 'Sekretaris Pribadi Pimpinan',
+                'role' => 'Sekretaris Pribadi',
+                'email' => 'sekpri@mrp-papuatengah.test',
+            ],
+            [
                 'name' => 'Staf Sekretariat MRP',
                 'role' => 'Staf Sekretariat',
                 'email' => 'staf@mrp-papuatengah.test',

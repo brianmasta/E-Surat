@@ -20,7 +20,7 @@ class MobileApiFormatter
             'is_active' => $user->is_active,
             'permissions' => [
                 'manage_letters' => $user->isAdmin(),
-                'dispose_letters' => $user->isAdmin() || $user->isLeader(),
+                'dispose_letters' => $user->isAdmin() || $user->isLeader() || $user->isPersonalSecretary(),
                 'act_on_dispositions' => $user->isAdmin() || $user->isLeader() || $user->isDepartmentHead(),
                 'manage_settings' => $user->isAdmin(),
             ],
@@ -99,6 +99,12 @@ class MobileApiFormatter
             'recipient_id' => $disposition->disposition_recipient_id,
             'instruction' => $disposition->instruction,
             'status' => $disposition->status,
+            'input_method' => $disposition->input_method,
+            'input_by_name' => $disposition->input_by_name,
+            'input_by_role' => $disposition->input_by_role,
+            'has_scan' => (bool) $disposition->scan_path,
+            'scan_original_name' => $disposition->scan_original_name,
+            'scan_url' => $disposition->scan_path ? route('api.mobile.dispositions.scan', $disposition, false) : null,
             'created_at' => $disposition->created_at?->toIso8601String(),
             'letter' => $disposition->relationLoaded('letter') && $disposition->letter
                 ? static::letter($disposition->letter)

@@ -62,12 +62,47 @@ class Letter extends Model
         return $this->belongsTo(ArchiveClassification::class, 'classification_code', 'code');
     }
 
+    public function canReceiveDisposition(): bool
+    {
+        return $this->type === 'Masuk';
+    }
+
+    public function syncDispositionStatus(): void
+    {
+        if (! $this->canReceiveDisposition()) {
+            return;
+        }
+
+        $statuses = $this->dispositions()
+            ->pluck('status')
+            ->filter()
+            ->values();
+
+        if ($statuses->isEmpty()) {
+            return;
+        }
+
+        $status = match (true) {
+            $statuses->every(fn (string $status) => $status === 'Selesai') => 'Selesai',
+            $statuses->contains(fn (string $status) => in_array($status, ['Diproses', 'Selesai'], true)) => 'Diproses',
+            default => 'Disposisi Pimpinan',
+        };
+
+        if ($this->status !== $status) {
+            $this->forceFill(['status' => $status])->save();
+        }
+    }
+
     public function scopeApplyDashboardFilters(Builder $query, array $filters): Builder
     {
         return $query
             ->when(($filters['type'] ?? 'Semua') !== 'Semua', fn (Builder $query) => $query->where('type', $filters['type']))
             ->when(($filters['unit'] ?? 'Semua') !== 'Semua', fn (Builder $query) => $query->where('unit_code', $filters['unit']))
-            ->when(($filters['status'] ?? 'Semua') !== 'Semua', fn (Builder $query) => $query->where('status', $filters['status']))
+            ->when(($filters['status'] ?? 'Semua') !== 'Semua', function (Builder $query) use ($filters) {
+                $filters['status'] === 'Disposisi Pimpinan'
+                    ? $query->whereIn('status', ['Disposisi Pimpinan', 'Disposisi'])
+                    : $query->where('status', $filters['status']);
+            })
             ->when(($filters['urgency'] ?? 'Semua') !== 'Semua', fn (Builder $query) => $query->where('urgency', $filters['urgency']))
             ->when(($filters['date_from'] ?? '') !== '', fn (Builder $query) => $query->whereDate('letter_date', '>=', $filters['date_from']))
             ->when(($filters['date_to'] ?? '') !== '', fn (Builder $query) => $query->whereDate('letter_date', '<=', $filters['date_to']))
