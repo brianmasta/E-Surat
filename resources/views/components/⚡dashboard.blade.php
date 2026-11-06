@@ -7,16 +7,28 @@ use App\Models\DispositionRecipient;
 use App\Models\Letter;
 use App\Models\LetterApproval;
 use App\Support\TaskInbox;
+use App\Support\LetterNumbering;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use App\Livewire\Concerns\WorkspacePanel;
 use Livewire\Component;
 use Livewire\WithFileUploads;
 use Livewire\WithPagination;
 
 new class extends Component
 {
+    use WorkspacePanel;
+
+    protected function workspacePage(): string
+    {
+        return 'surat';
+    }
+
     use WithFileUploads;
     use WithPagination;
+
+    #[\Livewire\Attributes\Locked]
+    public string $initialAction = '';
 
     public string $search = '';
 
@@ -122,7 +134,7 @@ new class extends Component
         $this->unitFilter = in_array(request('unit'), ['Semua', ...$unitCodes], true)
             ? request('unit')
             : 'Semua';
-        $this->selectedLetterId = Letter::latest('letter_date')->value('id');
+        $this->selectedLetterId = Letter::visibleTo(auth()->user())->latest('letter_date')->value('id');
 
         if (request('create') === 'Keluar' && $this->canManageLetters()) {
             $requestedUnit = is_string(request('unit')) ? request('unit') : null;
@@ -136,11 +148,28 @@ new class extends Component
                 $this->letterDate = request('letter_date');
             }
         }
+        if (in_array($this->initialAction, ['Masuk', 'Keluar'], true)) {
+            $this->createFromSidebar($this->initialAction);
+        }
+    }
+
+    #[\Livewire\Attributes\On('workspace-create-letter')]
+    public function createFromSidebar(string $type): void
+    {
+        abort_unless(in_array($type, ['Masuk', 'Keluar'], true), 422);
+        $this->openLetterForm($type, $this->unitFilter === 'Semua' ? $this->defaultUnitCode() : $this->unitFilter);
+    }
+
+    #[\Livewire\Attributes\On('workspace-export-letters')]
+    public function exportFromSidebar(): void
+    {
+        $this->redirect($this->exportUrl());
     }
 
     public function letters()
     {
         return Letter::query()
+            ->visibleTo(auth()->user())
             ->with('classification', 'dispositions')
             ->applyDashboardFilters($this->dashboardFilters())
             ->latest('letter_date')
@@ -169,19 +198,19 @@ new class extends Component
 
     public function updated(string $property, mixed $value = null): void
     {
-        if (in_array($property, ['search', 'statusFilter', 'urgencyFilter', 'dueFilter', 'dateFrom', 'dateTo'], true)) {
+        if (in_array($property, ['search', 'typeFilter', 'unitFilter', 'statusFilter', 'urgencyFilter', 'dueFilter', 'dateFrom', 'dateTo'], true)) {
             $this->resetPage();
         }
     }
 
     public function selectedLetter(): ?Letter
     {
-        return Letter::with('classification', 'attachments', 'approvals', 'dispositions.children')->find($this->selectedLetterId);
+        return Letter::visibleTo(auth()->user())->with('classification', 'attachments', 'approvals', 'dispositions.children')->find($this->selectedLetterId);
     }
 
     public function editingLetter(): ?Letter
     {
-        return $this->editingLetterId ? Letter::find($this->editingLetterId) : null;
+        return $this->editingLetterId ? Letter::visibleTo(auth()->user())->find($this->editingLetterId) : null;
     }
 
     public function archiveClassifications()
@@ -224,8 +253,8 @@ new class extends Component
         return collect($this->units())
             ->map(fn (array $unit) => [
                 ...$unit,
-                'incoming_count' => Letter::where('unit_code', $unit['code'])->where('type', 'Masuk')->count(),
-                'outgoing_count' => Letter::where('unit_code', $unit['code'])->where('type', 'Keluar')->count(),
+                'incoming_count' => Letter::visibleTo(auth()->user())->where('unit_code', $unit['code'])->where('type', 'Masuk')->count(),
+                'outgoing_count' => Letter::visibleTo(auth()->user())->where('unit_code', $unit['code'])->where('type', 'Keluar')->count(),
             ])
             ->values()
             ->all();
@@ -262,11 +291,13 @@ new class extends Component
 
     public function selectLetter(int $letterId): void
     {
+        abort_unless(Letter::visibleTo(auth()->user())->whereKey($letterId)->exists(), 404);
         $this->selectedLetterId = $letterId;
     }
 
     public function openDetailModal(int $letterId): void
     {
+        abort_unless(Letter::visibleTo(auth()->user())->whereKey($letterId)->exists(), 404);
         $this->selectedLetterId = $letterId;
         $this->outgoingDocument = null;
         $this->showDetailModal = true;
@@ -952,24 +983,7 @@ new class extends Component
 
     public function nextLetterNumber(?string $unitCode = null, ?string $classificationCode = null): string
     {
-        $unitCode = $this->normalizeUnitCode($unitCode);
-        $numbering = $this->numberingSettings();
-        $separator = $numbering['separator'];
-        $parts = [
-            $classificationCode ?: $numbering['prefix'],
-            str_pad((string) $numbering['next_sequence'], 3, '0', STR_PAD_LEFT),
-            $unitCode,
-        ];
-
-        if ($numbering['include_month']) {
-            $parts[] = now()->format('m');
-        }
-
-        if ($numbering['include_year']) {
-            $parts[] = now()->format('Y');
-        }
-
-        return implode($separator, $parts);
+        return LetterNumbering::nextLetterNumber($unitCode, $classificationCode);
     }
 
     public function defaultOutgoingBody(): string
@@ -979,59 +993,18 @@ new class extends Component
 
     public function nextAgendaNumber(?string $unitCode = null): string
     {
-        $unitCode = $this->normalizeUnitCode($unitCode);
-        $year = now()->format('Y');
-        $next = Letter::query()
-            ->where('type', 'Masuk')
-            ->where('unit_code', $unitCode)
-            ->whereYear('received_date', $year)
-            ->count() + 1;
-
-        return 'AG/'.$unitCode.'/'.$year.'/'.str_pad((string) $next, 4, '0', STR_PAD_LEFT);
+        return LetterNumbering::nextAgendaNumber($unitCode);
     }
 
     public function numberingSettings(): array
     {
-        $numbering = AppSetting::getValue('letter_numbering', [
-            'prefix' => '800',
-            'separator' => '/',
-            'include_month' => true,
-            'include_year' => true,
-            'next_sequence' => 1,
-        ]);
-
-        return [
-            'prefix' => (string) ($numbering['prefix'] ?? '800'),
-            'separator' => (string) ($numbering['separator'] ?? '/'),
-            'include_month' => (bool) ($numbering['include_month'] ?? true),
-            'include_year' => (bool) ($numbering['include_year'] ?? true),
-            'next_sequence' => max(1, (int) ($numbering['next_sequence'] ?? 1)),
-        ];
+        return LetterNumbering::settings($this->unitCode);
     }
 
     public function advanceNextLetterSequence(string $number): void
     {
-        $numbering = AppSetting::getValue('letter_numbering', [
-            'prefix' => '800',
-            'unit_code' => $this->defaultUnitCode(),
-            'separator' => '/',
-            'include_month' => true,
-            'include_year' => true,
-            'next_sequence' => 1,
-        ]);
-
-        $separator = (string) ($numbering['separator'] ?? '/');
-        $parts = $separator !== '' ? explode($separator, $number) : [];
-        $sequence = isset($parts[1]) && ctype_digit($parts[1]) ? (int) $parts[1] : null;
-
-        if ($sequence === null) {
-            return;
-        }
-
-        AppSetting::putValue('letter_numbering', [
-            ...$numbering,
-            'next_sequence' => max((int) ($numbering['next_sequence'] ?? 1), $sequence + 1),
-        ]);
+        abort_unless($this->canManageLetters(), 403);
+        LetterNumbering::advanceNextLetterSequence($number, $this->unitCode);
     }
 
     public function statusClass(string $status): string
@@ -1091,9 +1064,7 @@ new class extends Component
 };
 ?>
 
-<div x-data="{ toast: '', showToast: false }"
-     x-on:notify.window="toast = $event.detail.message; showToast = true; setTimeout(() => showToast = false, 2600)"
-     class="min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
+<div class="{{ $embedded ? 'workspace-panel' : 'app-shell min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]' }}">
     @php
         $letters = $this->letters();
         $selectedLetter = $this->selectedLetter();
@@ -1105,10 +1076,11 @@ new class extends Component
         $taskCount = TaskInbox::countFor($currentUser);
         $units = $this->units();
         $unitSummaries = $this->unitSummaries();
-        $overdueCount = App\Models\Letter::whereNotNull('due_date')->whereDate('due_date', '<', today())->where('status', '!=', 'Selesai')->count();
-        $dueSoonCount = App\Models\Letter::whereNotNull('due_date')->whereBetween('due_date', [today(), today()->addDays(3)])->where('status', '!=', 'Selesai')->count();
+        $overdueCount = App\Models\Letter::visibleTo(auth()->user())->whereNotNull('due_date')->whereDate('due_date', '<', today())->where('status', '!=', 'Selesai')->count();
+        $dueSoonCount = App\Models\Letter::visibleTo(auth()->user())->whereNotNull('due_date')->whereBetween('due_date', [today(), today()->addDays(3)])->where('status', '!=', 'Selesai')->count();
     @endphp
 
+    @unless ($embedded)
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
             <x-app-logo class="h-11 w-11" />
@@ -1121,17 +1093,15 @@ new class extends Component
         <nav class="mt-8 flex gap-2 overflow-x-auto lg:grid lg:overflow-visible">
             <button type="button"
                     wire:click="setCombinedFilter('Semua', 'Semua')"
-                    class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold transition {{ $typeFilter === 'Semua' && $unitFilter === 'Semua' ? 'bg-white/10 text-white' : 'text-slate-300 hover:bg-white/5' }}">
-                <x-icon name="dashboard" class="h-4 w-4" />
-                Dasbor
-            </button>
-            <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                    class="btn inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold transition {{ $typeFilter === 'Semua' && $unitFilter === 'Semua' ? 'bg-white/10 text-white' : 'text-slate-300 hover:bg-white/5' }}" wire:loading.attr="disabled" wire:target="setCombinedFilter('Semua', 'Semua')"><span class="button-label" wire:loading.remove wire:target="setCombinedFilter('Semua', 'Semua')"><x-icon name="dashboard" class="h-4 w-4" />
+                Dasbor</span><span class="button-progress" wire:loading.inline-flex wire:target="setCombinedFilter('Semua', 'Semua')"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'tugas']) }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                 <span class="inline-flex items-center gap-2"><x-icon name="task" class="h-4 w-4" />Tugas Saya</span>
                 @if ($taskCount > 0)
                     <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
                 @endif
             </a>
-            <a href="{{ route('tracking') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+            <a data-page-link href="{{ route('dashboard', ['view' => 'pelacakan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                 <x-icon name="route" class="h-4 w-4" />
                 Pelacakan Surat
             </a>
@@ -1140,33 +1110,31 @@ new class extends Component
                 <button type="button"
                         wire:click="openDispositionForm({{ $selectedLetterId ?? 0 }})"
                         @disabled(! $selectedLetterId)
-                        class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50">
-                    <x-icon name="send" class="h-4 w-4" />
-                    Disposisi
-                </button>
+                        class="btn inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50" wire:loading.attr="disabled" wire:target="openDispositionForm({{ $selectedLetterId ?? 0 }})"><span class="button-label" wire:loading.remove wire:target="openDispositionForm({{ $selectedLetterId ?? 0 }})"><x-icon name="send" class="h-4 w-4" />
+                    Disposisi</span><span class="button-progress" wire:loading.inline-flex wire:target="openDispositionForm({{ $selectedLetterId ?? 0 }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
             @endif
             @if ($currentUser?->isAdmin() || $currentUser?->isLeader() || $currentUser?->isPersonalSecretary())
-                <a href="{{ route('leadership') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <a data-page-link href="{{ route('dashboard', ['view' => 'disposisi']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                     <x-icon name="send" class="h-4 w-4" />
                     Halaman Pimpinan
                 </a>
             @endif
             @if ($currentUser?->isAdmin() || $currentUser?->isDepartmentHead())
-                <a href="{{ route('department-head') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <a data-page-link href="{{ route('dashboard', ['view' => 'tindak-lanjut']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                     <x-icon name="users" class="h-4 w-4" />
                     Halaman Kepala Bagian
                 </a>
             @endif
             @if ($this->canManageSettings())
-                <a href="{{ route('number-monitor') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <a data-page-link href="{{ route('dashboard', ['view' => 'monitoring']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                     <x-icon name="list-numbered" class="h-4 w-4" />
                     Monitoring Nomor
                 </a>
-                <a href="{{ route('sk-numbering') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <a data-page-link href="{{ route('dashboard', ['view' => 'sk']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                     <x-icon name="gavel" class="h-4 w-4" />
                     Penomoran SK
                 </a>
-                <a href="{{ route('settings') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+                <a data-page-link href="{{ route('dashboard', ['view' => 'pengaturan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                     <x-icon name="settings" class="h-4 w-4" />
                     Setting
                 </a>
@@ -1181,16 +1149,18 @@ new class extends Component
             </div>
         </div>
     </aside>
+    @endunless
 
-    <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
+    <section class="panel-main {{ $embedded ? 'workspace-panel-main' : 'min-w-0 px-4 py-6 sm:px-6 lg:px-8' }}">
+        @unless ($embedded)
         <header class="sticky top-0 z-10 -mx-4 border-b border-slate-200 bg-slate-100/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
-            <div class="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+            <div class="dashboard-header flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
                 <div class="min-w-0">
                     <p class="text-[11px] font-bold uppercase text-teal-700">{{ \Carbon\Carbon::now()->translatedFormat('l, j F Y') }}</p>
                     <h1 class="mt-0.5 text-xl font-bold leading-tight tracking-normal text-slate-950 sm:text-2xl">Dasbor Persuratan {{ $agencyProfile['short_name'] }}</h1>
                     <p class="mt-1 max-w-xl text-xs text-slate-600">Pengelolaan surat {{ $agencyProfile['name'] }}.</p>
                 </div>
-                <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center xl:justify-end">
+                <div class="dashboard-toolbar flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center xl:justify-end">
                     <label class="flex h-10 w-full items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 shadow-sm sm:w-72 lg:w-80">
                         <x-icon name="search" class="h-4 w-4 text-slate-400" />
                         <input wire:model.live.debounce.250ms="search"
@@ -1203,52 +1173,43 @@ new class extends Component
                             @php($actionUnit = $unitFilter === 'Semua' ? $this->defaultUnitCode() : $unitFilter)
                             <button type="button"
                                     wire:click="openLetterForm('Masuk', '{{ $actionUnit }}')"
-                                    class="inline-flex h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
-                                <x-icon name="inbox" class="mr-2 h-4 w-4" />
-                                Input Surat Masuk
-                            </button>
+                                    class="btn btn-outline-secondary inline-flex h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600" wire:loading.attr="disabled" wire:target="openLetterForm('Masuk', '{{ $actionUnit }}')"><span class="button-label" wire:loading.remove wire:target="openLetterForm('Masuk', '{{ $actionUnit }}')"><x-icon name="inbox" class="mr-2 h-4 w-4" />
+                                Input Surat Masuk</span><span class="button-progress" wire:loading.inline-flex wire:target="openLetterForm('Masuk', '{{ $actionUnit }}')"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             <button type="button"
                                     wire:click="openLetterForm('Keluar', '{{ $actionUnit }}')"
-                                    class="inline-flex h-10 items-center justify-center rounded-lg bg-teal-700 px-3 text-sm font-bold text-white shadow-sm hover:bg-teal-800">
-                                <x-icon name="outbox" class="mr-2 h-4 w-4" />
-                                Input Surat Keluar
-                            </button>
+                                    class="btn btn-primary inline-flex h-10 items-center justify-center rounded-lg bg-teal-700 px-3 text-sm font-bold text-white shadow-sm hover:bg-teal-800" wire:loading.attr="disabled" wire:target="openLetterForm('Keluar', '{{ $actionUnit }}')"><span class="button-label" wire:loading.remove wire:target="openLetterForm('Keluar', '{{ $actionUnit }}')"><x-icon name="outbox" class="mr-2 h-4 w-4" />
+                                Input Surat Keluar</span><span class="button-progress" wire:loading.inline-flex wire:target="openLetterForm('Keluar', '{{ $actionUnit }}')"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                         @endif
                         <form method="POST" action="{{ route('logout') }}">
                             @csrf
-                            <button type="submit" class="inline-flex h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
-                                <x-icon name="logout" class="mr-2 h-4 w-4" />
-                                Logout
-                            </button>
+                            <button type="submit" class="btn btn-outline-secondary inline-flex h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500"><span class="button-label"><x-icon name="logout" class="mr-2 h-4 w-4" />
+                                Logout</span><span class="button-progress" style="display: none;"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                         </form>
                     </div>
                 </div>
             </div>
         </header>
+        @endunless
 
-        <section class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-            @foreach ($unitSummaries as $unit)
-                <div class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                    <div class="text-sm text-slate-500">{{ $unit['code'] }} Masuk</div>
-                    <div class="mt-2 text-3xl font-bold">{{ $unit['incoming_count'] }}</div>
-                    <div class="text-sm text-slate-500">{{ $unit['name'] }}</div>
+        <section class="dashboard-overview mt-5 grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_180px]">
+            <details class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                <summary class="flex cursor-pointer items-center justify-between gap-3 p-5">
+                    <span><span class="block text-sm font-bold">Ringkasan Unit Surat</span><span class="mt-1 block text-xs text-slate-500">Buka tabel jumlah surat masuk dan keluar per unit.</span></span>
+                    <span class="text-lg text-teal-700" aria-hidden="true">⌄</span>
+                </summary>
+                <div class="overflow-x-auto border-t border-slate-100">
+                    <table class="table w-full text-left text-sm">
+                        <thead><tr><th scope="col" class="px-5 py-3">Unit Surat</th><th scope="col" class="px-5 py-3">Surat Masuk</th><th scope="col" class="px-5 py-3">Surat Keluar</th></tr></thead>
+                        <tbody>
+                            @foreach ($unitSummaries as $unit)
+                                <tr><th scope="row" class="px-5 py-3"><span class="font-semibold">{{ $unit['code'] }}</span><span class="mt-1 block text-xs font-normal text-slate-500">{{ $unit['name'] }}</span></th><td class="px-5 py-3 font-bold text-teal-700">{{ $unit['incoming_count'] }}</td><td class="px-5 py-3 font-bold text-orange-700">{{ $unit['outgoing_count'] }}</td></tr>
+                            @endforeach
+                        </tbody>
+                    </table>
                 </div>
-                <div class="rounded-lg border border-orange-200 bg-orange-50 p-5 shadow-sm">
-                    <div class="text-sm text-orange-700">{{ $unit['code'] }} Keluar</div>
-                    <div class="mt-2 text-3xl font-bold">{{ $unit['outgoing_count'] }}</div>
-                    <div class="text-sm text-orange-700">{{ $unit['name'] }}</div>
-                </div>
-            @endforeach
-            <div class="rounded-lg border border-rose-200 bg-rose-50 p-5 shadow-sm">
-                <div class="text-sm text-rose-700">Lewat Batas</div>
-                <div class="mt-2 text-3xl font-bold">{{ $overdueCount }}</div>
-                <div class="text-sm text-rose-700">butuh tindak lanjut</div>
-            </div>
-            <div class="rounded-lg border border-amber-200 bg-amber-50 p-5 shadow-sm">
-                <div class="text-sm text-amber-700">Dekat Tenggat</div>
-                <div class="mt-2 text-3xl font-bold">{{ $dueSoonCount }}</div>
-                <div class="text-sm text-amber-700">dalam 3 hari</div>
-            </div>
+            </details>
+            <div class="rounded-lg border border-rose-100 bg-rose-50 p-4"><div class="text-xs font-semibold text-rose-700">Lewat Batas</div><div class="mt-2 text-2xl font-bold text-rose-800">{{ $overdueCount }}</div><div class="mt-1 text-xs text-rose-600">butuh tindak lanjut</div></div>
+            <div class="rounded-lg border border-amber-100 bg-amber-50 p-4"><div class="text-xs font-semibold text-amber-700">Dekat Tenggat</div><div class="mt-2 text-2xl font-bold text-amber-800">{{ $dueSoonCount }}</div><div class="mt-1 text-xs text-amber-600">dalam 3 hari</div></div>
         </section>
 
         <section class="mt-5">
@@ -1264,35 +1225,20 @@ new class extends Component
                             @endif
                         </p>
                     </div>
-                    <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
-                        <a href="{{ $this->exportUrl() }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 hover:border-teal-600">
-                            Export CSV
-                        </a>
-                        <div class="inline-flex overflow-x-auto rounded-lg bg-slate-100 p-1">
-                            @foreach (['Semua', 'Masuk', 'Keluar'] as $filter)
-                                <button type="button"
-                                        wire:click="setFilter('{{ $filter }}')"
-                                        class="whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-bold {{ $typeFilter === $filter ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}">
-                                    {{ $filter }}
-                                </button>
-                            @endforeach
-                        </div>
-                        <div class="inline-flex overflow-x-auto rounded-lg bg-slate-100 p-1">
-                            @foreach (['Semua', ...collect($units)->pluck('code')->all()] as $filter)
-                                <button type="button"
-                                        wire:click="setUnitFilter('{{ $filter }}')"
-                                        class="whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-bold {{ $unitFilter === $filter ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}">
-                                    {{ $filter }}
-                                </button>
-                            @endforeach
-                        </div>
-                    </div>
+                    <label class="flex min-h-10 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 sm:min-w-72">
+                        <x-icon name="search" class="h-4 w-4 shrink-0 text-slate-400" />
+                        <input wire:model.live.debounce.250ms="search" type="search" class="min-w-0 flex-1 border-0 bg-transparent text-sm outline-none" placeholder="Cari nomor, agenda, perihal..." aria-label="Cari surat">
+                    </label>
+                </div>
+                <div class="grid gap-3 border-b border-slate-200 px-5 py-4 sm:grid-cols-2">
+                    <label class="grid gap-1 text-xs font-semibold text-slate-500">Jenis Surat<select wire:model.live="typeFilter" class="form-select min-h-10 text-sm">@foreach (['Semua', 'Masuk', 'Keluar'] as $filter)<option value="{{ $filter }}">{{ $filter === 'Semua' ? 'Semua Jenis Surat' : 'Surat '.$filter }}</option>@endforeach</select></label>
+                    <label class="grid gap-1 text-xs font-semibold text-slate-500">Unit Surat<select wire:model.live="unitFilter" class="form-select min-h-10 text-sm"><option value="Semua">Semua Unit Surat</option>@foreach ($units as $unit)<option value="{{ $unit['code'] }}">{{ $unit['code'] }} - {{ $unit['name'] }}</option>@endforeach</select></label>
                 </div>
 
                 <div class="grid gap-3 border-b border-slate-200 bg-slate-50 p-5 md:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
                     <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
                         Status
-                        <select wire:model.live="statusFilter" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                        <select wire:model.live="statusFilter" class="form-select min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
                             @foreach (['Semua', 'Baru', 'Disposisi Pimpinan', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Revisi Konsep', 'Selesai'] as $status)
                                 <option value="{{ $status }}">{{ $status }}</option>
                             @endforeach
@@ -1300,7 +1246,7 @@ new class extends Component
                     </label>
                     <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
                         Prioritas
-                        <select wire:model.live="urgencyFilter" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                        <select wire:model.live="urgencyFilter" class="form-select min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
                             @foreach (['Semua', 'Normal', 'Segera', 'Sangat Segera'] as $urgencyOption)
                                 <option value="{{ $urgencyOption }}">{{ $urgencyOption }}</option>
                             @endforeach
@@ -1308,7 +1254,7 @@ new class extends Component
                     </label>
                     <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
                         Tenggat
-                        <select wire:model.live="dueFilter" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                        <select wire:model.live="dueFilter" class="form-select min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
                             @foreach (['Semua', 'Lewat Batas', 'Dekat Tenggat', 'Tanpa Batas'] as $dueOption)
                                 <option value="{{ $dueOption }}">{{ $dueOption }}</option>
                             @endforeach
@@ -1316,87 +1262,58 @@ new class extends Component
                     </label>
                     <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
                         Dari Tanggal
-                        <input wire:model.live="dateFrom" type="date" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                        <input wire:model.live="dateFrom" type="date" class="form-control min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
                     </label>
                     <label class="grid gap-1 text-xs font-bold uppercase text-slate-500">
                         Sampai Tanggal
-                        <input wire:model.live="dateTo" type="date" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
+                        <input wire:model.live="dateTo" type="date" class="form-control min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold normal-case text-slate-900">
                     </label>
                     <div class="flex items-end">
-                        <button type="button" wire:click="resetAdvancedFilters" class="min-h-10 w-full rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:border-teal-600">
-                            Reset
-                        </button>
+                        <button type="button" wire:click="resetAdvancedFilters" class="btn btn-outline-secondary min-h-10 w-full rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:border-teal-600" wire:loading.attr="disabled" wire:target="resetAdvancedFilters"><span class="button-label" wire:loading.remove wire:target="resetAdvancedFilters">Reset</span><span class="button-progress" wire:loading.inline-flex wire:target="resetAdvancedFilters"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
                 </div>
 
                 <div class="overflow-x-auto">
-                    <table class="min-w-[1180px] w-full border-collapse text-left text-sm">
-                        <thead class="text-xs uppercase text-slate-500">
-                            <tr>
-                                <th class="border-b border-slate-200 px-5 py-3">Nomor</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Jenis</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Unit</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Kode Arsip</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Perihal</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Pihak Luar</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Prioritas</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Tenggat</th>
-                                <th class="border-b border-slate-200 px-5 py-3">Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @forelse ($letters as $letter)
-                                <tr wire:key="letter-{{ $letter->id }}"
-                                    wire:click="openDetailModal({{ $letter->id }})"
-                                    wire:keydown.enter="openDetailModal({{ $letter->id }})"
-                                    role="button"
-                                    tabindex="0"
-                                    class="cursor-pointer transition {{ $selectedLetterId === $letter->id ? 'bg-teal-50' : 'hover:bg-slate-50' }}">
-                                    <td class="border-b border-slate-100 px-5 py-4">
-                                        <div class="font-bold text-slate-950">{{ $letter->number }}</div>
-                                        <div class="text-xs text-slate-500">{{ $letter->letter_date->translatedFormat('d F Y') }}</div>
-                                        @if ($letter->agenda_number)
-                                            <div class="mt-1 text-xs font-semibold text-teal-700">{{ $letter->agenda_number }}</div>
-                                        @endif
-                                    </td>
-                                    <td class="border-b border-slate-100 px-5 py-4">
-                                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->typeClass($letter->type) }}">{{ $letter->type }}</span>
-                                    </td>
-                                    <td class="border-b border-slate-100 px-5 py-4">
-                                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->unitClass($letter->unit_code) }}">{{ $letter->unit_code }}</span>
-                                    </td>
-                                    <td class="border-b border-slate-100 px-5 py-4">
-                                        @if ($letter->classification_code)
-                                            <div class="font-bold text-slate-950">{{ $letter->classification_code }}</div>
-                                            <div class="max-w-44 truncate text-xs text-slate-500">{{ $letter->classification?->name }}</div>
-                                        @else
-                                            <span class="text-xs text-slate-400">Belum dipilih</span>
-                                        @endif
-                                    </td>
-                                    <td class="border-b border-slate-100 px-5 py-4">{{ $letter->subject }}</td>
-                                    <td class="border-b border-slate-100 px-5 py-4">{{ $letter->external_party }}</td>
-                                    <td class="border-b border-slate-100 px-5 py-4">
-                                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->urgencyClass($letter->urgency) }}">{{ $letter->urgency }}</span>
-                                    </td>
-                                    <td class="border-b border-slate-100 px-5 py-4">
-                                        @if ($letter->due_date)
-                                            <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->dueClass($letter) }}">{{ $letter->due_date->translatedFormat('d M Y') }}</span>
-                                        @else
-                                            <span class="text-xs text-slate-400">Tanpa batas</span>
-                                        @endif
-                                    </td>
-                                    <td class="border-b border-slate-100 px-5 py-4">
-                                        <span class="rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($letter->status) }}">{{ $letter->status }}</span>
-                                    </td>
-                                </tr>
-                            @empty
+                    <table class="table table-hover min-w-[760px] w-full text-left text-sm">
+                        <caption class="sr-only">Daftar surat dengan dropdown detail dan tindakan sesuai role.</caption>
+                        <thead><tr><th scope="col" class="px-5 py-3">Nomor Surat</th><th scope="col" class="px-5 py-3">Perihal</th><th scope="col" class="px-5 py-3">Jenis / Unit</th><th scope="col" class="px-5 py-3">Status</th><th scope="col" class="px-5 py-3 text-right">Detail</th></tr></thead>
+                        @forelse ($letters as $letter)
+                            <tbody x-data="{ expanded: false }" wire:key="letter-{{ $letter->id }}">
                                 <tr>
-                                    <td colspan="9" class="px-5 py-16 text-center text-slate-500">
-                                        Tidak ada surat yang cocok dengan filter saat ini.
+                                    <th scope="row" class="px-5 py-4 align-middle"><div class="font-bold text-slate-950">{{ $letter->number }}</div><div class="mt-1 text-xs font-normal text-slate-500">{{ $letter->letter_date->translatedFormat('d M Y') }}</div>@if ($letter->agenda_number)<div class="mt-1 text-xs font-semibold text-teal-700">{{ $letter->agenda_number }}</div>@endif</th>
+                                    <td class="px-5 py-4"><div class="max-w-xs font-semibold">{{ $letter->subject }}</div><div class="mt-1 text-xs text-slate-500">{{ $letter->external_party }}</div></td>
+                                    <td class="px-5 py-4"><span class="rounded-full px-2.5 py-1 text-xs font-bold {{ $this->typeClass($letter->type) }}">{{ $letter->type }}</span><div class="mt-2 text-xs font-semibold text-slate-500">{{ $letter->unit_code }}</div></td>
+                                    <td class="px-5 py-4"><span class="rounded-full px-2.5 py-1 text-xs font-bold {{ $this->statusClass($letter->status) }}">{{ $letter->status }}</span></td>
+                                    <td class="px-5 py-4 text-right"><button type="button" class="btn btn-outline-secondary inline-flex items-center gap-2 whitespace-nowrap px-3 py-2 text-xs font-semibold" x-on:click="expanded = !expanded" x-bind:aria-expanded="expanded" aria-controls="letter-dropdown-{{ $letter->id }}" aria-label="Detail surat {{ $letter->number }}"><span x-text="expanded ? 'Tutup detail' : 'Lihat detail'">Lihat detail</span><span x-bind:class="{ 'rotate-180': expanded }" class="transition-transform" aria-hidden="true">⌄</span></button></td>
+                                </tr>
+                                <tr id="letter-dropdown-{{ $letter->id }}" x-show="expanded" x-cloak>
+                                    <td colspan="5" class="monitor-detail-cell">
+                                        <div class="p-5">
+                                            <dl class="grid gap-4 text-xs sm:grid-cols-2 xl:grid-cols-4">
+                                                <div><dt class="font-semibold text-slate-500">Kode Klasifikasi Arsip</dt><dd class="mt-1 text-slate-900">{{ $letter->classification_code ?: 'Belum dipilih' }}{{ $letter->classification ? ' · '.$letter->classification->name : '' }}</dd></div>
+                                                <div><dt class="font-semibold text-slate-500">Prioritas / Sifat</dt><dd class="mt-1 text-slate-900">{{ $letter->urgency }} · {{ $letter->nature }}</dd></div>
+                                                <div><dt class="font-semibold text-slate-500">Tenggat Tindak Lanjut</dt><dd class="mt-1 text-slate-900">{{ $letter->due_date?->translatedFormat('d M Y') ?: 'Tanpa batas' }}</dd></div>
+                                                <div><dt class="font-semibold text-slate-500">Lokasi Arsip</dt><dd class="mt-1 text-slate-900">{{ $letter->archive_location ?: 'Belum diisi' }}{{ $letter->archive_box ? ' · '.$letter->archive_box : '' }}</dd></div>
+                                            </dl>
+                                            <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-slate-200 pt-4">
+                                                <button type="button" wire:click="openDetailModal({{ $letter->id }})" wire:loading.attr="disabled" wire:target="openDetailModal({{ $letter->id }})" class="btn btn-primary inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold"><x-icon name="eye" class="h-4 w-4" />Buka Detail Surat<span wire:loading.inline-block wire:target="openDetailModal({{ $letter->id }})" class="spinner-border spinner-border-sm" aria-hidden="true"></span></button>
+                                                @if ($this->canEditLetters())
+                                                    <button type="button" wire:click="openEditLetterForm({{ $letter->id }})" wire:loading.attr="disabled" wire:target="openEditLetterForm({{ $letter->id }})" class="btn btn-outline-secondary px-3 py-2 text-xs font-semibold">Edit Surat<span wire:loading.inline-block wire:target="openEditLetterForm({{ $letter->id }})" class="spinner-border spinner-border-sm" aria-hidden="true"></span></button>
+                                                @endif
+                                                @if ($this->canDispose() && $letter->canReceiveDisposition())
+                                                    <button type="button" wire:click="openDispositionForm({{ $letter->id }})" wire:loading.attr="disabled" wire:target="openDispositionForm({{ $letter->id }})" class="btn btn-outline-secondary px-3 py-2 text-xs font-semibold">Disposisi<span wire:loading.inline-block wire:target="openDispositionForm({{ $letter->id }})" class="spinner-border spinner-border-sm" aria-hidden="true"></span></button>
+                                                @endif
+                                                @if ($this->canDeleteLetters())
+                                                    <button type="button" wire:click="deleteLetter({{ $letter->id }})" wire:confirm="Hapus surat ini beserta dokumennya?" wire:loading.attr="disabled" wire:target="deleteLetter({{ $letter->id }})" class="btn btn-outline-danger px-3 py-2 text-xs font-semibold">Hapus Surat<span wire:loading.inline-block wire:target="deleteLetter({{ $letter->id }})" class="spinner-border spinner-border-sm" aria-hidden="true"></span></button>
+                                                @endif
+                                            </div>
+                                        </div>
                                     </td>
                                 </tr>
-                            @endforelse
-                        </tbody>
+                            </tbody>
+                        @empty
+                            <tbody><tr><td colspan="5" class="px-5 py-16 text-center text-slate-500">Tidak ada surat yang cocok dengan filter saat ini.</td></tr></tbody>
+                        @endforelse
                     </table>
                 </div>
                 @if ($letters->hasPages())
@@ -1417,7 +1334,7 @@ new class extends Component
                             <h2 class="mt-1 text-xl font-bold">Detail Surat</h2>
                             <p class="mt-1 text-sm text-slate-500">{{ $selectedLetter->number }}</p>
                         </div>
-                        <button type="button" wire:click="$set('showDetailModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">×</button>
+                        <button type="button" wire:click="$set('showDetailModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">×</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <div class="space-y-5 p-6">
@@ -1436,10 +1353,10 @@ new class extends Component
                                 <div class="text-sm font-bold text-slate-700">Aksi Surat</div>
                                 <div class="mt-3 flex flex-wrap gap-2">
                                     @if ($this->canDispose() && $selectedLetter->canReceiveDisposition())
-                                        <button type="button" wire:click="openDispositionForm({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Disposisi</button>
+                                        <button type="button" wire:click="openDispositionForm({{ $selectedLetter->id }})" class="btn btn-primary min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="openDispositionForm({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="openDispositionForm({{ $selectedLetter->id }})">Disposisi</span><span class="button-progress" wire:loading.inline-flex wire:target="openDispositionForm({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                                     @endif
                                     @if ($this->canEditLetters())
-                                        <button type="button" wire:click="openEditLetterForm({{ $selectedLetter->id }})" class="min-h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Edit Surat</button>
+                                        <button type="button" wire:click="openEditLetterForm({{ $selectedLetter->id }})" class="btn btn-outline-secondary min-h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="openEditLetterForm({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="openEditLetterForm({{ $selectedLetter->id }})">Edit Surat</span><span class="button-progress" wire:loading.inline-flex wire:target="openEditLetterForm({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                                     @endif
                                     @if ($selectedLetter->file_path)
                                         <a href="{{ route('letters.document.review', $selectedLetter) }}" target="_blank" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Review Dokumen</a>
@@ -1450,7 +1367,7 @@ new class extends Component
                                         <a href="{{ route('letters.template.docx', $selectedLetter) }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Export DOCX</a>
                                     @endif
                                     @if ($this->canDeleteLetters())
-                                        <button type="button" wire:click="deleteLetter({{ $selectedLetter->id }})" wire:confirm="Hapus surat ini? Data dan dokumen terkait akan ikut dihapus." class="min-h-10 rounded-lg border border-rose-200 bg-white px-4 text-sm font-bold text-rose-700 hover:border-rose-500">Hapus Surat</button>
+                                        <button type="button" wire:click="deleteLetter({{ $selectedLetter->id }})" wire:confirm="Hapus surat ini? Data dan dokumen terkait akan ikut dihapus." class="btn btn-outline-danger min-h-10 rounded-lg border border-rose-200 bg-white px-4 text-sm font-bold text-rose-700 hover:border-rose-500" wire:loading.attr="disabled" wire:target="deleteLetter({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="deleteLetter({{ $selectedLetter->id }})">Hapus Surat</span><span class="button-progress" wire:loading.inline-flex wire:target="deleteLetter({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menghapus…</span></span></button>
                                     @endif
                                 </div>
                             </div>
@@ -1564,13 +1481,9 @@ new class extends Component
                                     </div>
                                     @if ($this->canManageLetters())
                                         @if ($selectedLetter->approvals->isEmpty())
-                                            <button type="button" wire:click="startSignatureWorkflow({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                                                Mulai Alur
-                                            </button>
+                                            <button type="button" wire:click="startSignatureWorkflow({{ $selectedLetter->id }})" class="btn btn-primary min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="startSignatureWorkflow({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="startSignatureWorkflow({{ $selectedLetter->id }})">Mulai Alur</span><span class="button-progress" wire:loading.inline-flex wire:target="startSignatureWorkflow({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                                         @elseif ($selectedLetter->approvals->contains('status', 'Ditolak'))
-                                            <button type="button" wire:click="resubmitApprovalWorkflow({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                                                Ajukan Ulang
-                                            </button>
+                                            <button type="button" wire:click="resubmitApprovalWorkflow({{ $selectedLetter->id }})" class="btn btn-primary min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="resubmitApprovalWorkflow({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="resubmitApprovalWorkflow({{ $selectedLetter->id }})">Ajukan Ulang</span><span class="button-progress" wire:loading.inline-flex wire:target="resubmitApprovalWorkflow({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                                         @endif
                                     @endif
                                 </div>
@@ -1602,12 +1515,8 @@ new class extends Component
                                                             'Tanda Tangan Elektronik' => 'Tanda Tangani',
                                                             default => 'Proses',
                                                         })
-                                                        <button type="button" wire:click="approveLetterStep({{ $approval->id }})" class="rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800">
-                                                            {{ $actionLabel }}
-                                                        </button>
-                                                        <button type="button" wire:click="openApprovalRevisionModal({{ $approval->id }})" class="rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-sm font-bold text-rose-700 hover:bg-rose-50">
-                                                            Revisi / Tolak
-                                                        </button>
+                                                        <button type="button" wire:click="approveLetterStep({{ $approval->id }})" class="btn btn-primary rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="approveLetterStep({{ $approval->id }})"><span class="button-label" wire:loading.remove wire:target="approveLetterStep({{ $approval->id }})">{{ $actionLabel }}</span><span class="button-progress" wire:loading.inline-flex wire:target="approveLetterStep({{ $approval->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
+                                                        <button type="button" wire:click="openApprovalRevisionModal({{ $approval->id }})" class="btn btn-outline-danger rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-sm font-bold text-rose-700 hover:bg-rose-50" wire:loading.attr="disabled" wire:target="openApprovalRevisionModal({{ $approval->id }})"><span class="button-label" wire:loading.remove wire:target="openApprovalRevisionModal({{ $approval->id }})">Revisi / Tolak</span><span class="button-progress" wire:loading.inline-flex wire:target="openApprovalRevisionModal({{ $approval->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                                                     @endif
                                                 </div>
                                             </div>
@@ -1651,11 +1560,11 @@ new class extends Component
                                 <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
                                     <label class="grid gap-1 text-sm font-bold text-slate-600">
                                         Upload Dokumen Surat Keluar
-                                        <input wire:model="outgoingDocument" type="file" accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                        <input wire:model="outgoingDocument" type="file" accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                                         <span class="text-xs font-normal text-slate-500">Bisa diunggah setelah surat disimpan. File lama akan diganti jika sudah ada.</span>
                                         @error('outgoingDocument') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                     </label>
-                                    <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Upload File</button>
+                                    <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="uploadOutgoingDocument({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="uploadOutgoingDocument({{ $selectedLetter->id }})">Upload File</span><span class="button-progress" wire:loading.inline-flex wire:target="uploadOutgoingDocument({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                                 </div>
                             </form>
                         @endif
@@ -1669,21 +1578,21 @@ new class extends Component
                                     </div>
                                     <label class="grid gap-1 text-sm font-bold text-slate-600">
                                         Lampiran
-                                        <input wire:model="attachmentFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                        <input wire:model="attachmentFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                                         @error('attachmentFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                     </label>
                                     <label class="grid gap-1 text-sm font-bold text-slate-600">
                                         Nota Dinas
-                                        <input wire:model="memoFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                        <input wire:model="memoFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                                         @error('memoFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                     </label>
                                     <label class="grid gap-1 text-sm font-bold text-slate-600">
                                         Dokumen Pendukung
-                                        <input wire:model="supportingFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                        <input wire:model="supportingFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                                         @error('supportingFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                     </label>
                                     <div class="flex justify-end">
-                                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Upload Dokumen Tambahan</button>
+                                        <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="uploadAdditionalDocuments({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="uploadAdditionalDocuments({{ $selectedLetter->id }})">Upload Dokumen Tambahan</span><span class="button-progress" wire:loading.inline-flex wire:target="uploadAdditionalDocuments({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                                     </div>
                                 </div>
                             </form>
@@ -1734,12 +1643,12 @@ new class extends Component
 
                         @if ($this->canUpdateStatus())
                             <div class="flex flex-col gap-2 border-t border-slate-200 pt-5 sm:flex-row sm:justify-end">
-                                <select wire:change="updateStatus({{ $selectedLetter->id }}, $event.target.value)" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
+                                <select wire:change="updateStatus({{ $selectedLetter->id }}, $event.target.value)" class="form-select min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
                                     @foreach (['Baru', 'Disposisi Pimpinan', 'Diproses', 'Menunggu Paraf', 'Menunggu Persetujuan', 'Menunggu Tanda Tangan', 'Revisi Konsep', 'Selesai'] as $status)
                                         <option value="{{ $status }}" @selected($selectedLetter->status === $status)>{{ $status }}</option>
                                     @endforeach
                                 </select>
-                                <button type="button" wire:click="markDone({{ $selectedLetter->id }})" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold hover:border-teal-600">Tandai Selesai</button>
+                                <button type="button" wire:click="markDone({{ $selectedLetter->id }})" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="markDone({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="markDone({{ $selectedLetter->id }})">Tandai Selesai</span><span class="button-progress" wire:loading.inline-flex wire:target="markDone({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             </div>
                         @endif
                     </div>
@@ -1755,20 +1664,20 @@ new class extends Component
                             <p class="text-xs font-bold uppercase text-teal-700">Pencatatan Dokumen</p>
                             <h2 class="mt-1 text-xl font-bold">{{ $editingLetterId ? 'Edit Surat' : 'Catat Surat Baru' }}</h2>
                         </div>
-                        <button type="button" wire:click="$set('showLetterForm', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">×</button>
+                        <button type="button" wire:click="$set('showLetterForm', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showLetterForm', false)"><span class="button-label" wire:loading.remove wire:target="$set('showLetterForm', false)">×</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showLetterForm', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <div class="mt-5 grid gap-4 sm:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Jenis Surat
-                            <select wire:model.live="type" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <select wire:model.live="type" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 <option>Masuk</option>
                                 <option>Keluar</option>
                             </select>
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Unit Surat
-                            <select wire:model.live="unitCode" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <select wire:model.live="unitCode" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 @foreach ($units as $unit)
                                     <option value="{{ $unit['code'] }}">{{ $unit['code'] }} - {{ $unit['name'] }}</option>
                                 @endforeach
@@ -1777,7 +1686,7 @@ new class extends Component
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600 sm:col-span-2">
                             Kode Klasifikasi Arsip
-                            <select wire:model.live="classificationCode" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <select wire:model.live="classificationCode" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 <option value="">Pilih kode arsip Permendagri 83/2022</option>
                                 @foreach ($classifications as $classification)
                                     <option value="{{ $classification->code }}">{{ $classification->code }} - {{ $classification->name }}</option>
@@ -1791,14 +1700,14 @@ new class extends Component
                                 <div class="font-bold text-slate-800">Pilih Cara Membuat Surat Keluar</div>
                                 <div class="grid gap-3 sm:grid-cols-2">
                                     <label class="flex cursor-pointer gap-3 rounded-lg border bg-white p-4 {{ $outgoingInputMode === 'template' ? 'border-teal-600 ring-2 ring-teal-100' : 'border-slate-200' }}">
-                                        <input wire:model.live="outgoingInputMode" type="radio" value="template" class="mt-1 h-4 w-4 border-slate-300 text-teal-700">
+                                        <input wire:model.live="outgoingInputMode" type="radio" value="template" class="form-check-input mt-1 h-4 w-4 border-slate-300 text-teal-700">
                                         <span>
                                             <span class="block font-bold text-slate-800">Buat dari Template</span>
                                             <span class="mt-1 block text-sm font-normal text-slate-500">Tulis naskah di sistem, lalu export PDF/DOCX.</span>
                                         </span>
                                     </label>
                                     <label class="flex cursor-pointer gap-3 rounded-lg border bg-white p-4 {{ $outgoingInputMode === 'upload' ? 'border-teal-600 ring-2 ring-teal-100' : 'border-slate-200' }}">
-                                        <input wire:model.live="outgoingInputMode" type="radio" value="upload" class="mt-1 h-4 w-4 border-slate-300 text-teal-700">
+                                        <input wire:model.live="outgoingInputMode" type="radio" value="upload" class="form-check-input mt-1 h-4 w-4 border-slate-300 text-teal-700">
                                         <span>
                                             <span class="block font-bold text-slate-800">Upload Surat Jadi</span>
                                             <span class="mt-1 block text-sm font-normal text-slate-500">Nomor tetap dicatat, file final wajib diunggah.</span>
@@ -1811,17 +1720,17 @@ new class extends Component
                         @if ($type === 'Masuk')
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Nomor Agenda
-                                <input wire:model="agendaNumber" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <input wire:model="agendaNumber" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 @error('agendaNumber') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Tanggal Diterima
-                                <input wire:model="receivedDate" type="date" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <input wire:model="receivedDate" type="date" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 @error('receivedDate') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Sifat Surat
-                                <select wire:model="nature" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <select wire:model="nature" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                     <option>Biasa</option>
                                     <option>Penting</option>
                                     <option>Rahasia</option>
@@ -1831,7 +1740,7 @@ new class extends Component
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Prioritas
-                                <select wire:model="urgency" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <select wire:model="urgency" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                     <option>Normal</option>
                                     <option>Segera</option>
                                     <option>Sangat Segera</option>
@@ -1840,28 +1749,28 @@ new class extends Component
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600 sm:col-span-2">
                                 Batas Waktu Tindak Lanjut
-                                <input wire:model="dueDate" type="date" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <input wire:model="dueDate" type="date" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 @error('dueDate') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                         @endif
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Tanggal Surat
-                            <input wire:model="letterDate" type="date" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="letterDate" type="date" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('letterDate') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Nomor Surat
-                            <input wire:model="number" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Otomatis untuk surat keluar">
+                            <input wire:model="number" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Otomatis untuk surat keluar">
                             @error('number') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             {{ $type === 'Keluar' ? 'Tujuan Surat' : 'Pihak Luar' }}
-                            <input wire:model="externalParty" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="{{ $type === 'Keluar' ? 'Nama penerima atau instansi tujuan' : 'Pengirim atau penerima' }}">
+                            <input wire:model="externalParty" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="{{ $type === 'Keluar' ? 'Nama penerima atau instansi tujuan' : 'Pengirim atau penerima' }}">
                             @error('externalParty') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600 sm:col-span-2">
                             Perihal
-                            <input wire:model="subject" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Ringkasan perihal surat">
+                            <input wire:model="subject" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Ringkasan perihal surat">
                             @error('subject') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <div class="grid gap-4 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:col-span-2">
@@ -1872,17 +1781,17 @@ new class extends Component
                             <div class="grid gap-4 sm:grid-cols-2">
                                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                                     Lokasi Arsip Fisik
-                                    <input wire:model="archiveLocation" type="text" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Contoh: Ruang Arsip Lantai 2">
+                                    <input wire:model="archiveLocation" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Contoh: Ruang Arsip Lantai 2">
                                     @error('archiveLocation') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                 </label>
                                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                                     Boks / Map / Rak
-                                    <input wire:model="archiveBox" type="text" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Contoh: Rak A-03 / Boks 12">
+                                    <input wire:model="archiveBox" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Contoh: Rak A-03 / Boks 12">
                                     @error('archiveBox') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                 </label>
                                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                                     Kategori Retensi
-                                    <select wire:model="retentionCategory" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950">
+                                    <select wire:model="retentionCategory" class="form-select min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950">
                                         @foreach (['Aktif', 'Inaktif', 'Permanen', 'Siap Musnah', 'Dimusnahkan'] as $retentionOption)
                                             <option value="{{ $retentionOption }}">{{ $retentionOption }}</option>
                                         @endforeach
@@ -1891,13 +1800,13 @@ new class extends Component
                                 </label>
                                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                                     Batas Retensi
-                                    <input wire:model="retentionUntil" type="date" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950">
+                                    <input wire:model="retentionUntil" type="date" class="form-control min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950">
                                     @error('retentionUntil') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                 </label>
                             </div>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Catatan Arsip
-                                <textarea wire:model="archiveNotes" rows="3" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-950" placeholder="Catatan lokasi, kondisi fisik, atau jadwal pemindahan arsip."></textarea>
+                                <textarea wire:model="archiveNotes" rows="3" class="form-control rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-950" placeholder="Catatan lokasi, kondisi fisik, atau jadwal pemindahan arsip."></textarea>
                                 @error('archiveNotes') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                         </div>
@@ -1909,18 +1818,18 @@ new class extends Component
                                 </div>
                                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                                     Isi Surat
-                                    <textarea wire:model="outgoingBody" rows="8" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-950"></textarea>
+                                    <textarea wire:model="outgoingBody" rows="8" class="form-control rounded-lg border border-slate-200 bg-white px-3 py-2 text-slate-950"></textarea>
                                     @error('outgoingBody') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                 </label>
                                 <div class="grid gap-4 sm:grid-cols-2">
                                     <label class="grid gap-1 text-sm font-bold text-slate-600">
                                         Nama Penandatangan
-                                        <input wire:model="signerName" type="text" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Nama pejabat">
+                                        <input wire:model="signerName" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Nama pejabat">
                                         @error('signerName') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                     </label>
                                     <label class="grid gap-1 text-sm font-bold text-slate-600">
                                         Jabatan Penandatangan
-                                        <input wire:model="signerTitle" type="text" class="min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Jabatan">
+                                        <input wire:model="signerTitle" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 bg-white px-3 text-slate-950" placeholder="Jabatan">
                                         @error('signerTitle') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                                     </label>
                                 </div>
@@ -1928,7 +1837,7 @@ new class extends Component
                         @endif
                         <label class="grid gap-1 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-4 text-sm font-bold text-slate-600 sm:col-span-2">
                             {{ $type === 'Keluar' && $outgoingInputMode === 'upload' ? 'Upload Surat Jadi' : 'File Surat Utama' }}
-                            <input wire:model="document" type="file" accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                            <input wire:model="document" type="file" accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                             <span class="text-xs font-normal text-slate-500">
                                 PDF, JPG, JPEG, atau PNG. Maksimal 5 MB. {{ $type === 'Keluar' && $outgoingInputMode === 'upload' ? 'Wajib untuk mode upload surat jadi.' : '' }}
                             </span>
@@ -1952,25 +1861,25 @@ new class extends Component
                             </div>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Lampiran
-                                <input wire:model="attachmentFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                <input wire:model="attachmentFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                                 @error('attachmentFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Nota Dinas
-                                <input wire:model="memoFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                <input wire:model="memoFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                                 @error('memoFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Dokumen Pendukung
-                                <input wire:model="supportingFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                <input wire:model="supportingFiles" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                                 @error('supportingFiles.*') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                         </div>
                     </div>
 
                     <div class="mt-6 flex justify-end gap-2">
-                        <button type="button" wire:click="$set('showLetterForm', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
-                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">{{ $editingLetterId ? 'Simpan Perubahan' : 'Simpan Surat' }}</button>
+                        <button type="button" wire:click="$set('showLetterForm', false)" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showLetterForm', false)"><span class="button-label" wire:loading.remove wire:target="$set('showLetterForm', false)">Batal</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showLetterForm', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                        <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveLetter"><span class="button-label" wire:loading.remove wire:target="saveLetter">{{ $editingLetterId ? 'Simpan Perubahan' : 'Simpan Surat' }}</span><span class="button-progress" wire:loading.inline-flex wire:target="saveLetter"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                     </div>
                 </form>
             </div>
@@ -1984,18 +1893,18 @@ new class extends Component
                             <p class="text-xs font-bold uppercase text-rose-700">Revisi Konsep Surat</p>
                             <h2 class="mt-1 text-xl font-bold">Tolak / Kembalikan Konsep</h2>
                         </div>
-                        <button type="button" wire:click="$set('showRevisionModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
+                        <button type="button" wire:click="$set('showRevisionModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showRevisionModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showRevisionModal', false)">&times;</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showRevisionModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <label class="mt-5 grid gap-1 text-sm font-bold text-slate-600">
                         Catatan Revisi
-                        <textarea wire:model="revisionNote" rows="5" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan alasan penolakan atau bagian yang harus direvisi."></textarea>
+                        <textarea wire:model="revisionNote" rows="5" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan alasan penolakan atau bagian yang harus direvisi."></textarea>
                         @error('revisionNote') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                     </label>
 
                     <div class="mt-6 flex justify-end gap-2">
-                        <button type="button" wire:click="$set('showRevisionModal', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
-                        <button type="submit" class="min-h-11 rounded-lg bg-rose-700 px-4 text-sm font-bold text-white hover:bg-rose-800">Kembalikan untuk Revisi</button>
+                        <button type="button" wire:click="$set('showRevisionModal', false)" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showRevisionModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showRevisionModal', false)">Batal</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showRevisionModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                        <button type="submit" class="btn min-h-11 rounded-lg bg-rose-700 px-4 text-sm font-bold text-white hover:bg-rose-800" wire:loading.attr="disabled" wire:target="rejectApprovalStep"><span class="button-label" wire:loading.remove wire:target="rejectApprovalStep">Kembalikan untuk Revisi</span><span class="button-progress" wire:loading.inline-flex wire:target="rejectApprovalStep"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
                 </form>
             </div>
@@ -2009,7 +1918,7 @@ new class extends Component
                             <p class="text-xs font-bold uppercase text-teal-700">Disposisi Elektronik</p>
                             <h2 class="mt-1 text-xl font-bold">Kirim Instruksi</h2>
                         </div>
-                        <button type="button" wire:click="$set('showDispositionForm', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">×</button>
+                        <button type="button" wire:click="$set('showDispositionForm', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showDispositionForm', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDispositionForm', false)">×</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDispositionForm', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <div class="mt-5 grid gap-4">
@@ -2018,7 +1927,7 @@ new class extends Component
                             <div class="grid max-h-56 gap-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
                                 @foreach ($dispositionRecipients as $recipient)
                                     <label class="flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" wire:key="dashboard-disposition-recipient-{{ $recipient->id }}">
-                                        <input wire:model="recipientIds" type="checkbox" value="{{ $recipient->id }}" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                                        <input wire:model="recipientIds" type="checkbox" value="{{ $recipient->id }}" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                                         <span>{{ $recipient->name }}{{ $recipient->position ? ' - '.$recipient->position : '' }}</span>
                                     </label>
                                 @endforeach
@@ -2028,29 +1937,24 @@ new class extends Component
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Instruksi
-                            <textarea wire:model="instruction" rows="4" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan instruksi tindak lanjut..."></textarea>
+                            <textarea wire:model="instruction" rows="4" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan instruksi tindak lanjut..."></textarea>
                             @error('instruction') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             File Disposisi
-                            <input wire:model="dispositionScan" type="file" accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                            <input wire:model="dispositionScan" type="file" accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                             <span class="text-xs font-normal text-slate-500">Opsional. Unggah PDF/JPG/PNG jika disposisi memiliki file pendukung.</span>
                             @error('dispositionScan') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                     </div>
 
                     <div class="mt-6 flex justify-end gap-2">
-                        <button type="button" wire:click="$set('showDispositionForm', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
-                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Kirim Disposisi</button>
+                        <button type="button" wire:click="$set('showDispositionForm', false)" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showDispositionForm', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDispositionForm', false)">Batal</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDispositionForm', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                        <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveDisposition"><span class="button-label" wire:loading.remove wire:target="saveDisposition">Kirim Disposisi</span><span class="button-progress" wire:loading.inline-flex wire:target="saveDisposition"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                     </div>
                 </form>
             </div>
         @endif
-    </main>
+    </section>
 
-    <div x-show="showToast"
-         x-transition
-         x-cloak
-         class="fixed bottom-6 right-6 z-30 max-w-sm rounded-lg bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg"
-         x-text="toast"></div>
 </div>

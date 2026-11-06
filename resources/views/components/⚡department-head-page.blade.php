@@ -6,11 +6,19 @@ use App\Models\Disposition;
 use App\Models\DispositionRecipient;
 use App\Support\TaskInbox;
 use Illuminate\Validation\Rule;
+use App\Livewire\Concerns\WorkspacePanel;
 use Livewire\Component;
 use Livewire\WithPagination;
 
 new class extends Component
 {
+    use WorkspacePanel;
+
+    protected function workspacePage(): string
+    {
+        return 'tindak-lanjut';
+    }
+
     use WithPagination;
 
     public string $statusFilter = 'Semua';
@@ -39,7 +47,7 @@ new class extends Component
 
         return Disposition::query()
             ->with('letter.classification')
-            ->when($user?->isDepartmentHead(), fn ($query) => $query->where('recipient_name', $user->name))
+            ->when($user?->isDepartmentHead() || $user?->isStaff(), fn ($query) => $query->where('recipient_name', $user->name))
             ->when($this->statusFilter !== 'Semua', fn ($query) => $query->where('status', $this->statusFilter))
             ->latest()
             ->paginate($this->perPage);
@@ -56,7 +64,9 @@ new class extends Component
 
     public function selectedDisposition(): ?Disposition
     {
-        return Disposition::with('letter.classification', 'children')->find($this->selectedDispositionId);
+        return Disposition::with('letter.classification', 'children')
+            ->when(! auth()->user()?->isAdmin(), fn ($query) => $query->where('recipient_name', auth()->user()?->name))
+            ->find($this->selectedDispositionId);
     }
 
     public function openDispositionDetailModal(int $dispositionId): void
@@ -73,7 +83,7 @@ new class extends Component
     {
         $disposition = Disposition::findOrFail($dispositionId);
 
-        abort_unless($this->canActOnDisposition($disposition), 403);
+        abort_unless($this->canForwardDisposition($disposition), 403);
 
         $this->resetValidation();
         $this->selectedDispositionId = $dispositionId;
@@ -94,7 +104,7 @@ new class extends Component
         $user = auth()->user();
         $parent = Disposition::findOrFail($validated['selectedDispositionId']);
 
-        abort_unless($this->canActOnDisposition($parent), 403);
+        abort_unless($this->canForwardDisposition($parent), 403);
 
         $recipient = DispositionRecipient::findOrFail($validated['forwardRecipientId']);
 
@@ -152,7 +162,12 @@ new class extends Component
 
         $user = auth()->user();
 
-        return $user?->isAdmin() || $user?->isLeader() || ($user?->isDepartmentHead() && $disposition->recipient_name === $user->name);
+        return $user?->isAdmin() || $user?->isLeader() || (($user?->isDepartmentHead() || $user?->isStaff()) && $disposition->recipient_name === $user->name);
+    }
+
+    public function canForwardDisposition(?Disposition $disposition): bool
+    {
+        return ! auth()->user()?->isStaff() && $this->canActOnDisposition($disposition);
     }
 
     public function statusClass(string $status): string
@@ -168,9 +183,7 @@ new class extends Component
 };
 ?>
 
-<div x-data="{ toast: '', showToast: false }"
-     x-on:notify.window="toast = $event.detail.message; showToast = true; setTimeout(() => showToast = false, 2600)"
-     class="min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
+<div class="{{ $embedded ? 'workspace-panel' : 'app-shell min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]' }}">
     @php
         $currentUser = auth()->user();
         $agencyProfile = AppSetting::agency();
@@ -192,6 +205,7 @@ new class extends Component
             ->count();
     @endphp
 
+    @unless ($embedded)
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
             <x-app-logo class="h-11 w-11" />
@@ -202,22 +216,22 @@ new class extends Component
         </div>
 
         <nav class="mt-8 grid gap-2">
-            <a href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor Umum</a>
-            <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+            <a data-page-link href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor Umum</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'tugas']) }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                 <span class="inline-flex items-center gap-2"><x-icon name="task" class="h-4 w-4" />Tugas Saya</span>
                 @if ($taskCount > 0)
                     <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
                 @endif
             </a>
             @if ($currentUser?->isAdmin() || $currentUser?->isLeader() || $currentUser?->isPersonalSecretary())
-                <a href="{{ route('leadership') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Pimpinan</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'disposisi']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Pimpinan</a>
             @endif
-            <a href="{{ route('tracking') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
-            <a href="{{ route('department-head') }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="users" class="h-4 w-4" />Kepala Bagian</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'pelacakan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'tindak-lanjut']) }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="users" class="h-4 w-4" />Kepala Bagian</a>
             @if ($currentUser?->isAdmin())
-                <a href="{{ route('number-monitor') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
-                <a href="{{ route('sk-numbering') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
-                <a href="{{ route('settings') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'monitoring']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'sk']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'pengaturan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
             @endif
         </nav>
 
@@ -226,8 +240,10 @@ new class extends Component
             <div class="text-xs text-slate-400">{{ $currentUser->role }}</div>
         </div>
     </aside>
+    @endunless
 
-    <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
+    <section class="panel-main {{ $embedded ? 'workspace-panel-main' : 'min-w-0 px-4 py-6 sm:px-6 lg:px-8' }}">
+        @unless ($embedded)
         <header class="sticky top-0 z-10 -mx-4 flex flex-col gap-4 border-b border-slate-200 bg-slate-100/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 xl:flex-row xl:items-start xl:justify-between">
             <div>
                 <p class="text-xs font-bold uppercase text-teal-700">Kepala Bagian</p>
@@ -236,12 +252,11 @@ new class extends Component
             </div>
             <form method="POST" action="{{ route('logout') }}">
                 @csrf
-                <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
-                    <x-icon name="logout" class="mr-2 h-4 w-4" />
-                    Logout
-                </button>
+                <button type="submit" class="btn btn-outline-secondary inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500"><span class="button-label"><x-icon name="logout" class="mr-2 h-4 w-4" />
+                    Logout</span><span class="button-progress" style="display: none;"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
             </form>
         </header>
+        @endunless
 
         <section class="mt-6 grid gap-3 md:grid-cols-3">
             <div class="rounded-lg border border-amber-200 bg-amber-50 p-5 shadow-sm">
@@ -268,15 +283,13 @@ new class extends Component
                     @foreach (['Semua', 'Belum Dibaca', 'Diproses', 'Selesai'] as $status)
                         <button type="button"
                                 wire:click="setStatusFilter('{{ $status }}')"
-                                class="rounded-md px-3 py-1.5 text-sm font-bold {{ $statusFilter === $status ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}">
-                            {{ $status }}
-                        </button>
+                                class="btn rounded-md px-3 py-1.5 text-sm font-bold {{ $statusFilter === $status ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}" wire:loading.attr="disabled" wire:target="setStatusFilter('{{ $status }}')"><span class="button-label" wire:loading.remove wire:target="setStatusFilter('{{ $status }}')">{{ $status }}</span><span class="button-progress" wire:loading.inline-flex wire:target="setStatusFilter('{{ $status }}')"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     @endforeach
                 </div>
             </div>
 
             <div class="overflow-x-auto">
-                <table class="w-full min-w-[780px] border-collapse text-left text-sm">
+                <table class="table table-hover w-full min-w-[780px] border-collapse text-left text-sm">
                     <thead class="text-xs uppercase text-slate-500">
                         <tr>
                             <th class="border-b border-slate-200 px-5 py-3">Surat</th>
@@ -326,7 +339,7 @@ new class extends Component
                             <h2 class="mt-1 text-xl font-bold">Detail Disposisi</h2>
                             <p class="mt-1 text-sm text-slate-500">{{ $selectedDisposition->letter?->number ?: 'Disposisi Mandiri' }}</p>
                         </div>
-                        <button type="button" wire:click="$set('showDetailModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
+                        <button type="button" wire:click="$set('showDetailModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">&times;</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <div class="space-y-5 p-6">
@@ -341,12 +354,14 @@ new class extends Component
                             <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
                                 <div class="text-sm font-bold text-slate-700">Aksi Kepala Bagian</div>
                                 <div class="mt-3 flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-                                    <select wire:change="updateDispositionStatus({{ $selectedDisposition->id }}, $event.target.value)" class="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
+                                    <select wire:change="updateDispositionStatus({{ $selectedDisposition->id }}, $event.target.value)" class="form-select min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold">
                                         @foreach (['Belum Dibaca', 'Diproses', 'Selesai'] as $status)
                                             <option value="{{ $status }}" @selected($selectedDisposition->status === $status)>{{ $status }}</option>
                                         @endforeach
                                     </select>
-                                    <button type="button" wire:click="openForwardModal({{ $selectedDisposition->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Teruskan</button>
+                                    @if ($this->canForwardDisposition($selectedDisposition))
+                                    <button type="button" wire:click="openForwardModal({{ $selectedDisposition->id }})" class="btn btn-primary min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="openForwardModal({{ $selectedDisposition->id }})"><span class="button-label" wire:loading.remove wire:target="openForwardModal({{ $selectedDisposition->id }})">Teruskan</span><span class="button-progress" wire:loading.inline-flex wire:target="openForwardModal({{ $selectedDisposition->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                    @endif
                                     @if ($selectedDisposition->letter?->file_path)
                                         <a href="{{ route('letters.document.review', $selectedDisposition->letter) }}" target="_blank" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Review Dokumen</a>
                                         <a href="{{ route('letters.document.download', $selectedDisposition->letter) }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Download</a>
@@ -409,13 +424,13 @@ new class extends Component
                             <p class="text-xs font-bold uppercase text-teal-700">Tindak Lanjut Kepala Bagian</p>
                             <h2 class="mt-1 text-xl font-bold">Teruskan Disposisi</h2>
                         </div>
-                        <button type="button" wire:click="$set('showForwardModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
+                        <button type="button" wire:click="$set('showForwardModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showForwardModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showForwardModal', false)">&times;</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showForwardModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <div class="mt-5 grid gap-4">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Penerima Lanjutan
-                            <select wire:model="forwardRecipientId" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <select wire:model="forwardRecipientId" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 <option value="">Pilih penerima</option>
                                 @foreach ($forwardRecipients as $recipient)
                                     <option value="{{ $recipient->id }}">{{ $recipient->name }}{{ $recipient->position ? ' - '.$recipient->position : '' }}</option>
@@ -425,23 +440,18 @@ new class extends Component
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Instruksi Lanjutan
-                            <textarea wire:model="forwardInstruction" rows="4" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan instruksi untuk staf/unit pelaksana..."></textarea>
+                            <textarea wire:model="forwardInstruction" rows="4" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan instruksi untuk staf/unit pelaksana..."></textarea>
                             @error('forwardInstruction') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                     </div>
 
                     <div class="mt-6 flex justify-end gap-2">
-                        <button type="button" wire:click="$set('showForwardModal', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
-                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Teruskan</button>
+                        <button type="button" wire:click="$set('showForwardModal', false)" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showForwardModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showForwardModal', false)">Batal</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showForwardModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                        <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="forwardDisposition"><span class="button-label" wire:loading.remove wire:target="forwardDisposition">Teruskan</span><span class="button-progress" wire:loading.inline-flex wire:target="forwardDisposition"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Mengirim…</span></span></button>
                     </div>
                 </form>
             </div>
         @endif
-    </main>
+    </section>
 
-    <div x-show="showToast"
-         x-transition
-         x-cloak
-         class="fixed bottom-6 right-6 z-30 max-w-sm rounded-lg bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg"
-         x-text="toast"></div>
 </div>

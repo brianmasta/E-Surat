@@ -7,16 +7,28 @@ use App\Models\DispositionRecipient;
 use App\Models\Letter;
 use App\Models\User;
 use App\Support\TaskInbox;
+use App\Support\LetterNumbering;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rule;
+use App\Livewire\Concerns\WorkspacePanel;
 use Livewire\Component;
 use Livewire\WithFileUploads;
 use Livewire\WithPagination;
 
 new class extends Component
 {
+    use WorkspacePanel;
+
+    protected function workspacePage(): string
+    {
+        return 'pengaturan';
+    }
+
     use WithFileUploads;
     use WithPagination;
+
+    #[\Livewire\Attributes\Locked]
+    public string $initialTab = '';
 
     public array $agency = [];
 
@@ -58,7 +70,7 @@ new class extends Component
 
     public string $activeSettingsTab = 'profil';
 
-    public string $numberMonitorUnit = 'SET-MRP';
+    public string $numberMonitorUnit = 'Semua';
 
     public int $numberMonitorYear;
 
@@ -105,7 +117,6 @@ new class extends Component
     public function mount(): void
     {
         $this->numberMonitorYear = (int) now()->format('Y');
-        $this->numberMonitorUnit = AppSetting::defaultLetterUnitCode();
 
         $this->agency = AppSetting::agency();
 
@@ -118,6 +129,8 @@ new class extends Component
             'next_sequence' => 1,
         ]);
 
+        $this->numbering['unit_code'] = LetterNumbering::normalizeUnitCode($this->numbering['unit_code'] ?? null);
+        $this->numbering['next_sequence'] = LetterNumbering::settings($this->numbering['unit_code'])['next_sequence'];
         $this->units = AppSetting::letterUnits();
 
         $this->workflow = AppSetting::getValue('workflow', [
@@ -132,7 +145,7 @@ new class extends Component
 
         $this->roles = AppSetting::getValue('roles', []);
 
-        $requestedTab = request('tab');
+        $requestedTab = $this->initialTab !== '' ? $this->initialTab : request('tab');
         if (is_string($requestedTab) && array_key_exists($requestedTab, $this->settingsTabs())) {
             $this->activeSettingsTab = $requestedTab;
         }
@@ -140,19 +153,10 @@ new class extends Component
 
     public function settingsTabs(): array
     {
-        return [
-            'profil' => 'Profil Instansi',
-            'nomor' => 'Nomor & Alur',
-            'unit' => 'Unit Surat',
-            'kode-arsip' => 'Kode Arsip',
-            'monitoring-nomor' => 'Monitoring Nomor',
-            'pengguna' => 'Pengguna',
-            'disposisi' => 'Disposisi',
-            'android' => 'Android',
-            'audit' => 'Audit & Peran',
-        ];
+        return \App\Support\WorkspaceNavigation::settingsTabs();
     }
 
+    #[\Livewire\Attributes\On('workspace-settings-tab')]
     public function setSettingsTab(string $tab): void
     {
         if (! array_key_exists($tab, $this->settingsTabs())) {
@@ -210,6 +214,14 @@ new class extends Component
         $this->dispatch('notify', message: 'Profil instansi berhasil disimpan.');
     }
 
+    public function updatedNumbering(mixed $value, ?string $key): void
+    {
+        if ($key === 'unit_code') {
+            $this->numbering['next_sequence'] = LetterNumbering::settings((string) $value)['next_sequence'];
+            $this->resetValidation('numbering.next_sequence');
+        }
+    }
+
     public function saveNumbering(): void
     {
         $this->validate([
@@ -222,8 +234,17 @@ new class extends Component
         $this->numbering['include_month'] = (bool) ($this->numbering['include_month'] ?? false);
         $this->numbering['include_year'] = (bool) ($this->numbering['include_year'] ?? false);
 
+        $stored = AppSetting::getValue('letter_numbering');
+        $sequences = LetterNumbering::unitSequences($stored);
+        $sequences[$this->numbering['unit_code']] = (int) $this->numbering['next_sequence'];
+        $this->numbering = [
+            ...$stored,
+            ...$this->numbering,
+            'unit_sequences' => $sequences,
+            'next_sequence' => (int) $this->numbering['next_sequence'],
+        ];
         AppSetting::putValue('letter_numbering', $this->numbering);
-        ActivityLog::record('setting.updated', 'Format nomor surat keluar diperbarui.');
+        ActivityLog::record('setting.updated', 'Format nomor surat keluar diperbarui untuk unit '.$this->numbering['unit_code'].'.');
         $this->dispatch('notify', message: 'Format nomor surat berhasil disimpan.');
     }
 
@@ -299,6 +320,17 @@ new class extends Component
             return;
         }
 
+        $storedNumbering = AppSetting::getValue('letter_numbering');
+        $sequences = LetterNumbering::unitSequences($storedNumbering);
+        if ($oldCode && $oldCode !== $this->unitCode) {
+            $sequences[$this->unitCode] = $sequences[$oldCode] ?? 1;
+            unset($sequences[$oldCode]);
+            if (($this->numbering['unit_code'] ?? null) === $oldCode) {
+                $this->numbering['unit_code'] = $this->unitCode;
+            }
+        }
+        $sequences[$this->unitCode] ??= 1;
+
         $unit = [
             'code' => $this->unitCode,
             'name' => $this->unitName,
@@ -326,6 +358,13 @@ new class extends Component
         }
 
         AppSetting::putValue('letter_units', array_values($this->units));
+        $selectedUnit = LetterNumbering::normalizeUnitCode($this->numbering['unit_code'] ?? null);
+        $this->numbering = [
+            ...$storedNumbering,
+            'unit_code' => $selectedUnit,
+            'unit_sequences' => $sequences,
+            'next_sequence' => $sequences[$selectedUnit],
+        ];
         AppSetting::putValue('letter_numbering', $this->numbering);
         ActivityLog::record($this->editingUnitIndex !== null ? 'unit.updated' : 'unit.created', 'Unit surat disimpan: '.$this->unitCode);
         $this->resetUnitForm();
@@ -355,11 +394,14 @@ new class extends Component
         $unit = $this->units[$index];
 
         if (Letter::where('unit_code', $unit['code'])->exists()) {
-            $this->dispatch('notify', message: 'Unit tidak bisa dihapus karena sudah dipakai surat.');
+            $this->dispatch('notify', message: 'Unit tidak bisa dihapus karena sudah dipakai surat.', type: 'warning');
 
             return;
         }
 
+        $storedNumbering = AppSetting::getValue('letter_numbering');
+        $sequences = LetterNumbering::unitSequences($storedNumbering);
+        unset($sequences[$unit['code']]);
         unset($this->units[$index]);
         $this->units = array_values($this->units);
 
@@ -380,6 +422,14 @@ new class extends Component
         }
 
         AppSetting::putValue('letter_units', $this->units);
+        $sequences = LetterNumbering::unitSequences([...$storedNumbering, 'unit_sequences' => $sequences]);
+        $selectedUnit = LetterNumbering::normalizeUnitCode($this->numbering['unit_code'] ?? null);
+        $this->numbering = [
+            ...$storedNumbering,
+            'unit_code' => $selectedUnit,
+            'unit_sequences' => $sequences,
+            'next_sequence' => $sequences[$selectedUnit],
+        ];
         AppSetting::putValue('letter_numbering', $this->numbering);
 
         if ($this->editingUnitIndex === $index) {
@@ -491,13 +541,13 @@ new class extends Component
         $classification = ArchiveClassification::withCount('letters')->findOrFail($classificationId);
 
         if ($classification->letters_count > 0) {
-            $this->dispatch('notify', message: 'Kode arsip tidak bisa dihapus karena sudah dipakai surat.');
+            $this->dispatch('notify', message: 'Kode arsip tidak bisa dihapus karena sudah dipakai surat.', type: 'warning');
 
             return;
         }
 
         if (ArchiveClassification::where('parent_code', $classification->code)->exists()) {
-            $this->dispatch('notify', message: 'Kode arsip tidak bisa dihapus karena masih memiliki turunan.');
+            $this->dispatch('notify', message: 'Kode arsip tidak bisa dihapus karena masih memiliki turunan.', type: 'warning');
 
             return;
         }
@@ -911,7 +961,7 @@ new class extends Component
     public function toggleUser(int $userId): void
     {
         if (auth()->id() === $userId) {
-            $this->dispatch('notify', message: 'Akun yang sedang dipakai tidak bisa dinonaktifkan.');
+            $this->dispatch('notify', message: 'Akun yang sedang dipakai tidak bisa dinonaktifkan.', type: 'warning');
 
             return;
         }
@@ -932,7 +982,7 @@ new class extends Component
     public function deleteUser(int $userId): void
     {
         if (auth()->id() === $userId) {
-            $this->dispatch('notify', message: 'Akun yang sedang dipakai tidak bisa dihapus.');
+            $this->dispatch('notify', message: 'Akun yang sedang dipakai tidak bisa dihapus.', type: 'warning');
 
             return;
         }
@@ -1067,9 +1117,19 @@ new class extends Component
         return implode($separator, $parts);
     }
 
+    public function numberMonitorRows(): array
+    {
+        return collect($this->units)
+            ->filter(fn (array $unit) => $this->numberMonitorUnit === 'Semua' || $unit['code'] === $this->numberMonitorUnit)
+            ->map(fn (array $unit) => [
+                'unit_name' => $unit['name'],
+                ...LetterNumbering::monitor($unit['code'], $this->numberMonitorYear, $this->numberMonitorCheck !== '' ? (int) $this->numberMonitorCheck : null),
+            ])->values()->all();
+    }
+
     public function numberMonitor(): array
     {
-        $nextSequence = max(1, (int) ($this->numbering['next_sequence'] ?? 1));
+        $nextSequence = LetterNumbering::settings($this->numberMonitorUnit)['next_sequence'];
         $used = Letter::query()
             ->where('type', 'Keluar')
             ->where('unit_code', $this->numberMonitorUnit)
@@ -1230,9 +1290,7 @@ new class extends Component
 };
 ?>
 
-<div x-data="{ toast: '', showToast: false }"
-     x-on:notify.window="toast = $event.detail.message; showToast = true; setTimeout(() => showToast = false, 2600)"
-     class="min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
+<div class="{{ $embedded ? 'workspace-panel' : 'app-shell min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]' }}">
     @php
         $currentUser = auth()->user();
         $dispositionRecipients = $this->dispositionRecipients();
@@ -1241,11 +1299,11 @@ new class extends Component
         $archiveClassifications = $this->archiveClassifications();
         $activityLogs = $this->recentActivityLogs();
         $settingsTabs = $this->settingsTabs();
-        $numberMonitor = $this->numberMonitor();
         $agencyProfile = AppSetting::agency();
         $taskCount = TaskInbox::countFor($currentUser);
     @endphp
 
+    @unless ($embedded)
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
             <x-app-logo class="h-11 w-11" />
@@ -1256,27 +1314,27 @@ new class extends Component
         </div>
 
         <nav class="mt-8 flex gap-2 overflow-x-auto lg:grid lg:overflow-visible">
-            <a href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor</a>
-            <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+            <a data-page-link href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'tugas']) }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                 <span class="inline-flex items-center gap-2"><x-icon name="task" class="h-4 w-4" />Tugas Saya</span>
                 @if ($taskCount > 0)
                     <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
                 @endif
             </a>
             @if ($currentUser?->isAdmin() || $currentUser?->isLeader())
-                <a href="{{ route('leadership') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Halaman Pimpinan</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'disposisi']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Halaman Pimpinan</a>
             @endif
             @if ($currentUser?->isAdmin() || $currentUser?->isDepartmentHead())
-                <a href="{{ route('department-head') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="users" class="h-4 w-4" />Halaman Kepala Bagian</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'tindak-lanjut']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="users" class="h-4 w-4" />Halaman Kepala Bagian</a>
             @endif
-            <a href="{{ route('tracking') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'pelacakan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
 
             @if ($currentUser?->isAdmin() || $currentUser?->isLeader())
-                <a href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Disposisi</a>
+                <a data-page-link href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Disposisi</a>
             @endif
-            <a href="{{ route('number-monitor') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
-            <a href="{{ route('sk-numbering') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
-            <a href="{{ route('settings') }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="settings" class="h-4 w-4" />Setting</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'monitoring']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'sk']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'pengaturan']) }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="settings" class="h-4 w-4" />Setting</a>
         </nav>
 
         <div class="mt-10 hidden border-t border-white/10 pt-5 lg:flex lg:items-center lg:gap-3">
@@ -1287,8 +1345,10 @@ new class extends Component
             </div>
         </div>
     </aside>
+    @endunless
 
-    <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
+    <section class="panel-main {{ $embedded ? 'workspace-panel-main' : 'min-w-0 px-4 py-6 sm:px-6 lg:px-8' }}">
+        @unless ($embedded)
         <header class="sticky top-0 z-10 -mx-4 flex flex-col gap-4 border-b border-slate-200 bg-slate-100/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 xl:flex-row xl:items-start xl:justify-between">
             <div>
                 <p class="text-xs font-bold uppercase text-teal-700">Konfigurasi Aplikasi</p>
@@ -1296,31 +1356,30 @@ new class extends Component
                 <p class="mt-2 max-w-2xl text-sm text-slate-600">Atur identitas instansi, format nomor surat, batas dokumen, notifikasi, dan peran pengguna {{ $agencyProfile['name'] }}.</p>
             </div>
             <div class="flex flex-col gap-2 sm:flex-row">
-                <a href="{{ route('dashboard') }}" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
+                <a data-page-link href="{{ route('dashboard') }}" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-teal-600">
                     <x-icon name="dashboard" class="mr-2 h-4 w-4" />
                     Kembali ke Dasbor
                 </a>
                 <form method="POST" action="{{ route('logout') }}">
                     @csrf
-                    <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
-                        <x-icon name="logout" class="mr-2 h-4 w-4" />
-                        Logout
-                    </button>
+                    <button type="submit" class="btn btn-outline-secondary inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500"><span class="button-label"><x-icon name="logout" class="mr-2 h-4 w-4" />
+                        Logout</span><span class="button-progress" style="display: none;"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                 </form>
             </div>
         </header>
+        @endunless
 
+        @unless ($embedded)
         <nav class="mt-6 overflow-x-auto rounded-lg border border-slate-200 bg-white p-1 shadow-sm">
             <div class="flex min-w-max gap-1">
                 @foreach ($settingsTabs as $tabKey => $tabLabel)
                     <button type="button"
                             wire:click="setSettingsTab('{{ $tabKey }}')"
-                            class="rounded-md px-4 py-2 text-sm font-bold transition {{ $activeSettingsTab === $tabKey ? 'bg-teal-700 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950' }}">
-                        {{ $tabLabel }}
-                    </button>
+                            class="btn rounded-md px-4 py-2 text-sm font-bold transition {{ $activeSettingsTab === $tabKey ? 'bg-teal-700 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950' }}" wire:loading.attr="disabled" wire:target="setSettingsTab('{{ $tabKey }}')"><span class="button-label" wire:loading.remove wire:target="setSettingsTab('{{ $tabKey }}')">{{ $tabLabel }}</span><span class="button-progress" wire:loading.inline-flex wire:target="setSettingsTab('{{ $tabKey }}')"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                 @endforeach
             </div>
         </nav>
+        @endunless
 
         <section class="mt-5 grid items-start gap-5 {{ in_array($activeSettingsTab, ['profil', 'nomor'], true) ? 'xl:grid-cols-[minmax(0,1fr)_360px]' : '' }}">
             <div class="min-w-0 space-y-5">
@@ -1334,53 +1393,53 @@ new class extends Component
                     <div class="mt-5 grid gap-4 md:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Nama Aplikasi
-                            <input wire:model="agency.app_name" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: E-Surat Setda">
+                            <input wire:model="agency.app_name" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: E-Surat Setda">
                             @error('agency.app_name') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Nama Singkat / Inisial
-                            <input wire:model="agency.short_name" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: SETDA">
+                            <input wire:model="agency.short_name" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: SETDA">
                             @error('agency.short_name') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Nama Instansi
-                            <input wire:model="agency.name" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="agency.name" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('agency.name') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Unit Kerja
-                            <input wire:model="agency.unit" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="agency.unit" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('agency.unit') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Jabatan Pimpinan / Penandatangan
-                            <input wire:model="agency.leader_title" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Sekretaris Daerah">
+                            <input wire:model="agency.leader_title" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Sekretaris Daerah">
                             @error('agency.leader_title') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Tempat Surat
-                            <input wire:model="agency.city" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Nabire">
+                            <input wire:model="agency.city" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Nabire">
                             @error('agency.city') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Email
-                            <input wire:model="agency.email" type="email" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="agency.email" type="email" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('agency.email') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Telepon
-                            <input wire:model="agency.phone" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="agency.phone" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('agency.phone') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600 md:col-span-2">
                             Alamat
-                            <textarea wire:model="agency.address" rows="3" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950"></textarea>
+                            <textarea wire:model="agency.address" rows="3" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950"></textarea>
                             @error('agency.address') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                     </div>
 
                     <div class="mt-5 flex justify-end">
-                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Simpan Profil</button>
+                        <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveAgency"><span class="button-label" wire:loading.remove wire:target="saveAgency">Simpan Profil</span><span class="button-progress" wire:loading.inline-flex wire:target="saveAgency"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                     </div>
                 </form>
                 @endif
@@ -1390,7 +1449,7 @@ new class extends Component
                     <div class="flex flex-col gap-4 border-b border-slate-200 pb-4 lg:flex-row lg:items-start lg:justify-between">
                         <div>
                             <h2 class="text-lg font-bold">Format Nomor Surat Keluar</h2>
-                            <p class="text-sm text-slate-500">Atur pola nomor otomatis dan nomor urut berikutnya.</p>
+                            <p class="text-sm text-slate-500">Atur pola nomor otomatis. Nomor urut berikutnya disimpan terpisah untuk setiap Unit Surat.</p>
                         </div>
                         <div class="rounded-lg border border-teal-100 bg-teal-50 px-4 py-3">
                             <div class="text-xs font-bold uppercase text-teal-700">Preview Nomor</div>
@@ -1402,30 +1461,30 @@ new class extends Component
                         <div class="grid min-w-0 gap-4 xl:grid-cols-2">
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Kode Awal
-                                <input wire:model.live="numbering.prefix" type="text" class="min-h-11 min-w-0 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <input wire:model.live="numbering.prefix" type="text" class="form-control min-h-11 min-w-0 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 <span class="text-xs font-normal text-slate-500">Contoh: 800 atau kode klasifikasi bawaan.</span>
                                 @error('numbering.prefix') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
-                                Kode Unit
-                                <select wire:model.live="numbering.unit_code" class="min-h-11 min-w-0 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                Unit Surat
+                                <select wire:model.live="numbering.unit_code" class="form-select min-h-11 min-w-0 rounded-lg border border-slate-200 px-3 text-slate-950">
                                     @foreach ($units as $unit)
                                         <option value="{{ $unit['code'] }}">{{ $unit['code'] }} - {{ $unit['name'] }}</option>
                                     @endforeach
                                 </select>
-                                <span class="text-xs font-normal text-slate-500">Unit default saat membuat nomor.</span>
+                                <span class="text-xs font-normal text-slate-500">Pilih unit yang nomor urutnya ingin diatur. Format lainnya berlaku untuk semua unit.</span>
                                 @error('numbering.unit_code') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Pemisah
-                                <input wire:model.live="numbering.separator" type="text" class="min-h-11 min-w-0 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <input wire:model.live="numbering.separator" type="text" class="form-control min-h-11 min-w-0 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 <span class="text-xs font-normal text-slate-500">Umumnya memakai garis miring (/).</span>
                                 @error('numbering.separator') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Nomor Berikutnya
-                                <input wire:model.live="numbering.next_sequence" type="number" min="1" class="min-h-11 min-w-0 rounded-lg border border-slate-200 px-3 text-slate-950">
-                                <span class="text-xs font-normal text-slate-500">Bisa diubah jika perlu lompat nomor.</span>
+                                <input wire:model.live="numbering.next_sequence" type="number" min="1" class="form-control min-h-11 min-w-0 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <span class="text-xs font-normal text-slate-500">Nomor berikutnya khusus unit {{ $numbering['unit_code'] }}. Unit lain memiliki urutannya sendiri.</span>
                                 @error('numbering.next_sequence') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                         </div>
@@ -1435,14 +1494,14 @@ new class extends Component
                             <div class="mt-3 grid gap-3">
                                 <label class="flex min-h-11 items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-600">
                                     <span>Pakai Bulan</span>
-                                    <input wire:model.live="numbering.include_month" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                                    <input wire:model.live="numbering.include_month" type="checkbox" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                                 </label>
                                 <label class="flex min-h-11 items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-600">
                                     <span>Pakai Tahun</span>
-                                    <input wire:model.live="numbering.include_year" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                                    <input wire:model.live="numbering.include_year" type="checkbox" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                                 </label>
                             </div>
-                            <button type="submit" class="mt-4 min-h-11 w-full rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Simpan Format</button>
+                            <button type="submit" class="btn btn-primary mt-4 min-h-11 w-full rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveNumbering"><span class="button-label" wire:loading.remove wire:target="saveNumbering">Simpan Format</span><span class="button-progress" wire:loading.inline-flex wire:target="saveNumbering"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                         </div>
                     </div>
                 </form>
@@ -1459,36 +1518,34 @@ new class extends Component
                     <form wire:submit="saveUnit" class="mt-5 grid gap-4 md:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Kode Unit
-                            <input wire:model="unitCode" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: BAG UMUM">
+                            <input wire:model="unitCode" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: BAG UMUM">
                             <span class="text-xs font-normal text-slate-500">Gunakan huruf, angka, spasi, dan tanda hubung. Kode yang sudah dipakai surat tidak bisa diganti.</span>
                             @error('unitCode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Nama Unit
-                            <input wire:model="unitName" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Bagian Umum">
+                            <input wire:model="unitName" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Bagian Umum">
                             @error('unitName') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600 md:col-span-2">
                             Deskripsi
-                            <textarea wire:model="unitDescription" rows="3" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Keterangan singkat unit surat"></textarea>
+                            <textarea wire:model="unitDescription" rows="3" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Keterangan singkat unit surat"></textarea>
                             @error('unitDescription') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="flex min-h-11 items-center gap-3 rounded-lg border border-slate-200 px-3 text-sm font-bold text-slate-600">
-                            <input wire:model="unitIsDefault" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                            <input wire:model="unitIsDefault" type="checkbox" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                             Jadikan unit default
                         </label>
                         <div class="flex flex-col gap-2 md:col-span-2 sm:flex-row sm:justify-end">
                             @if ($editingUnitIndex !== null)
-                                <button type="button" wire:click="resetUnitForm" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal Edit</button>
+                                <button type="button" wire:click="resetUnitForm" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="resetUnitForm"><span class="button-label" wire:loading.remove wire:target="resetUnitForm">Batal Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="resetUnitForm"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             @endif
-                            <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                                {{ $editingUnitIndex !== null ? 'Simpan Perubahan' : 'Tambah Unit' }}
-                            </button>
+                            <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveUnit"><span class="button-label" wire:loading.remove wire:target="saveUnit">{{ $editingUnitIndex !== null ? 'Simpan Perubahan' : 'Tambah Unit' }}</span><span class="button-progress" wire:loading.inline-flex wire:target="saveUnit"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                         </div>
                     </form>
 
                     <div class="mt-5 overflow-x-auto rounded-lg border border-slate-200">
-                        <table class="w-full min-w-[760px] border-collapse text-left text-sm">
+                        <table class="table table-hover w-full min-w-[760px] border-collapse text-left text-sm">
                             <thead class="bg-slate-50 text-xs uppercase text-slate-500">
                                 <tr>
                                     <th class="border-b border-slate-200 px-4 py-3">Kode</th>
@@ -1513,8 +1570,8 @@ new class extends Component
                                         </td>
                                         <td class="border-b border-slate-100 px-4 py-3">
                                             <div class="flex flex-wrap gap-2">
-                                                <button type="button" wire:click="editUnit({{ $index }})" class="whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Edit</button>
-                                                <button type="button" wire:click="deleteUnit({{ $index }})" wire:confirm="Hapus unit surat ini?" class="whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50">Hapus</button>
+                                                <button type="button" wire:click="editUnit({{ $index }})" class="btn btn-outline-secondary whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="editUnit({{ $index }})"><span class="button-label" wire:loading.remove wire:target="editUnit({{ $index }})">Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="editUnit({{ $index }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                                <button type="button" wire:click="deleteUnit({{ $index }})" wire:confirm="Hapus unit surat ini?" class="btn btn-outline-danger whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50" wire:loading.attr="disabled" wire:target="deleteUnit({{ $index }})"><span class="button-label" wire:loading.remove wire:target="deleteUnit({{ $index }})">Hapus</span><span class="button-progress" wire:loading.inline-flex wire:target="deleteUnit({{ $index }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menghapus…</span></span></button>
                                             </div>
                                         </td>
                                     </tr>
@@ -1539,7 +1596,7 @@ new class extends Component
                         <form wire:submit="previewClassificationImport" class="grid gap-2 rounded-lg border border-dashed border-slate-300 bg-slate-50 p-3 text-sm lg:w-[360px]">
                             <label class="grid gap-1 font-bold text-slate-600">
                                 Import Excel / CSV
-                                <input wire:model="classificationImport" type="file" accept=".xlsx,.csv,.txt" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                                <input wire:model="classificationImport" type="file" accept=".xlsx,.csv,.txt" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                                 <span class="text-xs font-normal text-slate-500">Template .xlsx sudah dipisah menjadi kolom kode, nama, kode induk, dan deskripsi.</span>
                                 @error('classificationImport') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
@@ -1547,7 +1604,7 @@ new class extends Component
                                 <a href="{{ route('archive-classifications.import-template') }}" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:border-teal-600">
                                     Download Template
                                 </a>
-                                <button type="submit" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Preview Data</button>
+                                <button type="submit" class="btn btn-primary min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="previewClassificationImport"><span class="button-label" wire:loading.remove wire:target="previewClassificationImport">Preview Data</span><span class="button-progress" wire:loading.inline-flex wire:target="previewClassificationImport"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             </div>
                         </form>
                     </div>
@@ -1571,12 +1628,8 @@ new class extends Component
                                     </p>
                                 </div>
                                 <div class="flex flex-col gap-2 sm:flex-row">
-                                    <button type="button" wire:click="cancelClassificationImport" class="min-h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:border-rose-500">
-                                        Batalkan
-                                    </button>
-                                    <button type="button" wire:click="confirmClassificationImport" @disabled($previewValidCount === 0) class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50">
-                                        Simpan Data Valid
-                                    </button>
+                                    <button type="button" wire:click="cancelClassificationImport" class="btn btn-outline-secondary min-h-10 rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-700 hover:border-rose-500" wire:loading.attr="disabled" wire:target="cancelClassificationImport"><span class="button-label" wire:loading.remove wire:target="cancelClassificationImport">Batalkan</span><span class="button-progress" wire:loading.inline-flex wire:target="cancelClassificationImport"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                    <button type="button" wire:click="confirmClassificationImport" @disabled($previewValidCount === 0) class="btn btn-primary min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800 disabled:cursor-not-allowed disabled:opacity-50" wire:loading.attr="disabled" wire:target="confirmClassificationImport"><span class="button-label" wire:loading.remove wire:target="confirmClassificationImport">Simpan Data Valid</span><span class="button-progress" wire:loading.inline-flex wire:target="confirmClassificationImport"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                                 </div>
                             </div>
                             <div class="flex flex-col gap-3 border-b border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1585,7 +1638,7 @@ new class extends Component
                                 </div>
                                 <label class="flex items-center gap-2 text-sm font-bold text-slate-600">
                                     Per halaman
-                                    <select wire:model.live="classificationPreviewPerPage" class="min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-950">
+                                    <select wire:model.live="classificationPreviewPerPage" class="form-select min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-950">
                                         @foreach ([10, 25, 50] as $pageSize)
                                             <option value="{{ $pageSize }}">{{ $pageSize }}</option>
                                         @endforeach
@@ -1594,7 +1647,7 @@ new class extends Component
                             </div>
 
                             <div class="overflow-x-auto">
-                                <table class="w-full min-w-[920px] border-collapse text-left text-sm">
+                                <table class="table table-hover w-full min-w-[920px] border-collapse text-left text-sm">
                                     <thead class="bg-white text-xs uppercase text-slate-500">
                                         <tr>
                                             <th class="border-b border-slate-200 px-4 py-3">Status</th>
@@ -1627,11 +1680,10 @@ new class extends Component
                                 <div class="flex flex-col gap-3 border-t border-slate-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                                     <div class="text-sm font-semibold text-slate-600">Halaman {{ $classificationPreviewPage }} dari {{ $previewTotalPages }}</div>
                                     <div class="flex gap-2">
-                                        <button type="button" wire:click="setClassificationPreviewPage({{ $classificationPreviewPage - 1 }})" @disabled($classificationPreviewPage <= 1) class="min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600 disabled:cursor-not-allowed disabled:opacity-50">
-                                            Sebelumnya
-                                        </button>
-                                        <button type="button" wire:click="setClassificationPreviewPage({{ $classificationPreviewPage + 1 }})" @disabled($classificationPreviewPage >= $previewTotalPages) class="min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600 disabled:cursor-not-allowed disabled:opacity-50">
-                                            Berikutnya
+                                        <button type="button" wire:click="setClassificationPreviewPage({{ $classificationPreviewPage - 1 }})" @disabled($classificationPreviewPage <= 1) class="btn btn-outline-secondary min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600 disabled:cursor-not-allowed disabled:opacity-50" wire:loading.attr="disabled" wire:target="setClassificationPreviewPage({{ $classificationPreviewPage - 1 }})"><span class="button-label" wire:loading.remove wire:target="setClassificationPreviewPage({{ $classificationPreviewPage - 1 }})">Sebelumnya</span><span class="button-progress" wire:loading.inline-flex wire:target="setClassificationPreviewPage({{ $classificationPreviewPage - 1 }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                        <button type="button" wire:click="setClassificationPreviewPage({{ $classificationPreviewPage + 1 }})" @disabled($classificationPreviewPage >= $previewTotalPages) class="btn btn-outline-secondary min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600 disabled:cursor-not-allowed disabled:opacity-50" wire:loading.attr="disabled" wire:target="setClassificationPreviewPage({{ $classificationPreviewPage + 1 }})">
+                                            <span class="button-label" wire:loading.remove wire:target="setClassificationPreviewPage({{ $classificationPreviewPage + 1 }})">Berikutnya</span>
+                                            <span class="button-progress" wire:loading.inline-flex wire:target="setClassificationPreviewPage({{ $classificationPreviewPage + 1 }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span>
                                         </button>
                                     </div>
                                 </div>
@@ -1642,31 +1694,29 @@ new class extends Component
                     <form wire:submit="saveClassification" class="mt-5 grid gap-4 md:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Kode Arsip
-                            <input wire:model="classificationCode" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: 000.1.2">
+                            <input wire:model="classificationCode" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: 000.1.2">
                             @error('classificationCode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Kode Induk
-                            <input wire:model="classificationParentCode" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: 000.1">
+                            <input wire:model="classificationParentCode" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 uppercase text-slate-950" placeholder="Contoh: 000.1">
                             @error('classificationParentCode') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600 md:col-span-2">
                             Nama Klasifikasi
-                            <input wire:model="classificationName" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Perjalanan Dinas Dalam Negeri">
+                            <input wire:model="classificationName" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Perjalanan Dinas Dalam Negeri">
                             @error('classificationName') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600 md:col-span-2">
                             Deskripsi
-                            <textarea wire:model="classificationDescription" rows="3" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Keterangan singkat kode klasifikasi arsip"></textarea>
+                            <textarea wire:model="classificationDescription" rows="3" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Keterangan singkat kode klasifikasi arsip"></textarea>
                             @error('classificationDescription') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <div class="flex flex-col gap-2 md:col-span-2 sm:flex-row sm:justify-end">
                             @if ($editingClassificationId)
-                                <button type="button" wire:click="resetClassificationForm" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal Edit</button>
+                                <button type="button" wire:click="resetClassificationForm" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="resetClassificationForm"><span class="button-label" wire:loading.remove wire:target="resetClassificationForm">Batal Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="resetClassificationForm"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             @endif
-                            <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                                {{ $editingClassificationId ? 'Simpan Perubahan' : 'Tambah Kode Arsip' }}
-                            </button>
+                            <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveClassification"><span class="button-label" wire:loading.remove wire:target="saveClassification">{{ $editingClassificationId ? 'Simpan Perubahan' : 'Tambah Kode Arsip' }}</span><span class="button-progress" wire:loading.inline-flex wire:target="saveClassification"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                         </div>
                     </form>
 
@@ -1674,11 +1724,11 @@ new class extends Component
                         <div class="grid gap-3 border-b border-slate-200 bg-white p-4 md:grid-cols-[minmax(0,1fr)_220px_220px_auto] md:items-end">
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Pencarian
-                                <input wire:model.live.debounce.300ms="classificationSearch" type="search" class="min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950" placeholder="Cari kode, nama, induk, atau deskripsi">
+                                <input wire:model.live.debounce.300ms="classificationSearch" type="search" class="form-control min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950" placeholder="Cari kode, nama, induk, atau deskripsi">
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Jenis Kode
-                                <select wire:model.live="classificationParentFilter" class="min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950">
+                                <select wire:model.live="classificationParentFilter" class="form-select min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950">
                                     @foreach (['Semua', 'Induk Utama', 'Turunan'] as $parentFilter)
                                         <option value="{{ $parentFilter }}">{{ $parentFilter }}</option>
                                     @endforeach
@@ -1686,15 +1736,13 @@ new class extends Component
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Status Pemakaian
-                                <select wire:model.live="classificationUsageFilter" class="min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950">
+                                <select wire:model.live="classificationUsageFilter" class="form-select min-h-10 rounded-lg border border-slate-200 px-3 text-sm text-slate-950">
                                     @foreach (['Semua', 'Dipakai', 'Belum Dipakai'] as $usageFilter)
                                         <option value="{{ $usageFilter }}">{{ $usageFilter }}</option>
                                     @endforeach
                                 </select>
                             </label>
-                            <button type="button" wire:click="resetClassificationFilters" class="min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600">
-                                Reset
-                            </button>
+                            <button type="button" wire:click="resetClassificationFilters" class="btn btn-outline-secondary min-h-10 rounded-lg border border-slate-200 px-4 text-sm font-bold text-slate-700 hover:border-teal-600" wire:loading.attr="disabled" wire:target="resetClassificationFilters"><span class="button-label" wire:loading.remove wire:target="resetClassificationFilters">Reset</span><span class="button-progress" wire:loading.inline-flex wire:target="resetClassificationFilters"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                         </div>
                         <div class="flex flex-col gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                             <div class="text-sm font-semibold text-slate-600">
@@ -1706,7 +1754,7 @@ new class extends Component
                             </div>
                             <label class="flex items-center gap-2 text-sm font-bold text-slate-600">
                                 Per halaman
-                                <select wire:model.live="classificationPerPage" class="min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-950">
+                                <select wire:model.live="classificationPerPage" class="form-select min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-sm text-slate-950">
                                     @foreach ([10, 25, 50] as $pageSize)
                                         <option value="{{ $pageSize }}">{{ $pageSize }}</option>
                                     @endforeach
@@ -1715,7 +1763,7 @@ new class extends Component
                         </div>
 
                         <div class="overflow-x-auto">
-                            <table class="w-full min-w-[920px] border-collapse text-left text-sm">
+                            <table class="table table-hover w-full min-w-[920px] border-collapse text-left text-sm">
                                 <thead class="bg-slate-50 text-xs uppercase text-slate-500">
                                     <tr>
                                         <th class="border-b border-slate-200 px-4 py-3">Kode</th>
@@ -1739,8 +1787,8 @@ new class extends Component
                                             <td class="border-b border-slate-100 px-4 py-3">{{ $classification->letters_count }}</td>
                                             <td class="border-b border-slate-100 px-4 py-3">
                                                 <div class="flex flex-wrap gap-2">
-                                                    <button type="button" wire:click="editClassification({{ $classification->id }})" class="whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Edit</button>
-                                                    <button type="button" wire:click="deleteClassification({{ $classification->id }})" wire:confirm="Hapus kode klasifikasi arsip ini?" class="whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50">Hapus</button>
+                                                    <button type="button" wire:click="editClassification({{ $classification->id }})" class="btn btn-outline-secondary whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="editClassification({{ $classification->id }})"><span class="button-label" wire:loading.remove wire:target="editClassification({{ $classification->id }})">Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="editClassification({{ $classification->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                                    <button type="button" wire:click="deleteClassification({{ $classification->id }})" wire:confirm="Hapus kode klasifikasi arsip ini?" class="btn btn-outline-danger whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50" wire:loading.attr="disabled" wire:target="deleteClassification({{ $classification->id }})"><span class="button-label" wire:loading.remove wire:target="deleteClassification({{ $classification->id }})">Hapus</span><span class="button-progress" wire:loading.inline-flex wire:target="deleteClassification({{ $classification->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menghapus…</span></span></button>
                                                 </div>
                                             </td>
                                         </tr>
@@ -1764,119 +1812,15 @@ new class extends Component
 
                 @if ($activeSettingsTab === 'monitoring-nomor')
                 <section class="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-                    <div class="flex flex-col gap-4 border-b border-slate-200 pb-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div>
-                            <h2 class="text-lg font-bold">Monitoring Nomor Surat Keluar</h2>
-                            <p class="text-sm text-slate-500">Cari nomor urut yang sudah dipakai dan nomor kosong yang masih bisa digunakan.</p>
-                        </div>
-                        <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
-                            <div class="font-bold text-slate-500">Nomor Berikutnya</div>
-                            <div class="mt-1 text-xl font-bold text-slate-950">{{ str_pad((string) $numberMonitor['next_sequence'], 3, '0', STR_PAD_LEFT) }}</div>
-                        </div>
+                    <div class="border-b border-slate-200 pb-4">
+                        <h2 class="text-lg font-bold">Monitoring Nomor Surat Keluar</h2>
+                        <p class="mt-1 text-sm text-slate-500">Ringkasan per unit dalam tabel. Buka dropdown detail untuk melihat nomor kosong dan histori.</p>
                     </div>
-
-                    <div class="mt-5 grid gap-4 md:grid-cols-3">
-                        <label class="grid gap-1 text-sm font-bold text-slate-600">
-                            Unit Surat
-                            <select wire:model.live="numberMonitorUnit" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
-                                @foreach ($units as $unit)
-                                    <option value="{{ $unit['code'] }}">{{ $unit['code'] }} - {{ $unit['name'] }}</option>
-                                @endforeach
-                            </select>
-                        </label>
-                        <label class="grid gap-1 text-sm font-bold text-slate-600">
-                            Tahun Surat
-                            <input wire:model.live="numberMonitorYear" type="number" min="2000" max="2100" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
-                        </label>
-                        <label class="grid gap-1 text-sm font-bold text-slate-600">
-                            Cek Nomor Urut
-                            <input wire:model.live.debounce.300ms="numberMonitorCheck" type="number" min="1" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: 25">
-                        </label>
+                    <div class="mt-5">
+                        <x-number-monitor-filters :units="$units" :year="$numberMonitorYear" unit-model="numberMonitorUnit" year-model="numberMonitorYear" check-model="numberMonitorCheck" />
                     </div>
-
-                    <div class="mt-5 grid gap-3 md:grid-cols-3">
-                        <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
-                            <div class="text-sm font-bold text-emerald-700">Nomor Terpakai</div>
-                            <div class="mt-2 text-3xl font-bold">{{ $numberMonitor['used_count'] }}</div>
-                        </div>
-                        <div class="rounded-lg border border-amber-200 bg-amber-50 p-4">
-                            <div class="text-sm font-bold text-amber-700">Nomor Kosong</div>
-                            <div class="mt-2 text-3xl font-bold">{{ $numberMonitor['missing_count'] }}</div>
-                        </div>
-                        <div class="rounded-lg border {{ $numberMonitor['check_sequence'] ? ($numberMonitor['check_is_available'] ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50') : 'border-slate-200 bg-slate-50' }} p-4">
-                            <div class="text-sm font-bold {{ $numberMonitor['check_sequence'] ? ($numberMonitor['check_is_available'] ? 'text-emerald-700' : 'text-rose-700') : 'text-slate-600' }}">Hasil Cek</div>
-                            <div class="mt-2 text-sm font-semibold">
-                                @if ($numberMonitor['check_sequence'])
-                                    Nomor {{ str_pad((string) $numberMonitor['check_sequence'], 3, '0', STR_PAD_LEFT) }}
-                                    {{ $numberMonitor['check_is_available'] ? 'masih kosong' : 'sudah dipakai' }}
-                                    @if ($numberMonitor['check_is_available'] && $numberMonitor['check_recommendation'])
-                                        <div class="mt-2 rounded-lg bg-white/70 px-3 py-2 text-xs text-slate-700 ring-1 ring-black/5">
-                                            <span class="font-bold">Rekomendasi tanggal lama:</span>
-                                            {{ $numberMonitor['check_recommendation']['date']?->translatedFormat('d M Y') ?: '-' }}
-                                            <div class="mt-1 font-normal">{{ $numberMonitor['check_recommendation']['note'] }}</div>
-                                        </div>
-                                    @endif
-                                @else
-                                    Masukkan nomor urut untuk dicek.
-                                @endif
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
-                        <div class="rounded-lg border border-slate-200 p-4">
-                            <div class="font-bold">Nomor Kosong yang Bisa Dipakai</div>
-                            @if ($numberMonitor['missing_items'])
-                                <div class="mt-3 grid gap-2 md:grid-cols-2">
-                                    @foreach ($numberMonitor['missing_items'] as $item)
-                                        <div class="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                                            <div class="flex items-start justify-between gap-2">
-                                                <div>
-                                                    <div class="text-sm font-bold text-amber-900">{{ str_pad((string) $item['sequence'], 3, '0', STR_PAD_LEFT) }}</div>
-                                                    <div class="mt-1 text-xs font-semibold text-amber-800">Rekomendasi tanggal lama: {{ $item['recommended_date']?->translatedFormat('d M Y') ?: '-' }}</div>
-                                                    <div class="mt-1 text-xs text-amber-700">{{ $item['recommendation_note'] }}</div>
-                                                </div>
-                                                <a href="{{ route('dashboard', ['create' => 'Keluar', 'unit' => $numberMonitorUnit, 'number' => $item['suggested_number'], 'letter_date' => $item['recommended_date']?->toDateString()]) }}"
-                                                   class="shrink-0 rounded-lg bg-teal-700 px-3 py-1.5 text-xs font-bold text-white hover:bg-teal-800">
-                                                    Pakai
-                                                </a>
-                                            </div>
-                                            <div class="mt-2 break-all text-xs font-semibold text-slate-600">{{ $item['suggested_number'] }}</div>
-                                        </div>
-                                    @endforeach
-                                </div>
-                            @else
-                                <p class="mt-3 text-sm text-slate-500">Belum ada celah nomor pada rentang yang terbaca.</p>
-                            @endif
-
-                            @if ($numberMonitor['missing_ranges'])
-                                <div class="mt-4 border-t border-slate-200 pt-4">
-                                    <div class="text-sm font-bold text-slate-600">Ringkasan Rentang Kosong</div>
-                                    <div class="mt-2 flex flex-wrap gap-2">
-                                        @foreach ($numberMonitor['missing_ranges'] as [$start, $end])
-                                            <span class="rounded-lg bg-slate-100 px-3 py-1.5 text-sm font-bold text-slate-700">
-                                                {{ str_pad((string) $start, 3, '0', STR_PAD_LEFT) }}{{ $start !== $end ? ' - '.str_pad((string) $end, 3, '0', STR_PAD_LEFT) : '' }}
-                                            </span>
-                                        @endforeach
-                                    </div>
-                                </div>
-                            @endif
-                        </div>
-
-                        <div class="rounded-lg border border-slate-200 p-4">
-                            <div class="font-bold">Histori Tanggal Nomor Terpakai</div>
-                            <div class="mt-3 space-y-3">
-                                @forelse ($numberMonitor['recent_used'] as $item)
-                                    <div class="border-l-4 border-teal-700 pl-3">
-                                        <div class="text-sm font-bold">{{ str_pad((string) $item['sequence'], 3, '0', STR_PAD_LEFT) }} | {{ $item['number'] }}</div>
-                                        <div class="mt-1 text-xs font-semibold text-slate-500">Tanggal surat: {{ $item['letter_date']?->translatedFormat('d M Y') ?: '-' }}</div>
-                                        <div class="mt-1 text-xs text-slate-500">{{ $item['subject'] }}</div>
-                                    </div>
-                                @empty
-                                    <p class="text-sm text-slate-500">Belum ada nomor surat keluar untuk filter ini.</p>
-                                @endforelse
-                            </div>
-                        </div>
+                    <div class="mt-5">
+                        <x-number-monitor-table :rows="$this->numberMonitorRows()" history-title="Histori Tanggal Nomor Terpakai" />
                     </div>
                 </section>
                 @endif
@@ -1891,26 +1835,26 @@ new class extends Component
                     <div class="mt-5 grid gap-4 md:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Maksimal Upload (MB)
-                            <input wire:model="workflow.max_upload_mb" type="number" min="1" max="50" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="workflow.max_upload_mb" type="number" min="1" max="50" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('workflow.max_upload_mb') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Jenis File Diizinkan
-                            <input wire:model="workflow.allowed_files" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="workflow.allowed_files" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('workflow.allowed_files') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="flex min-h-12 items-center gap-3 rounded-lg border border-slate-200 px-3 text-sm font-bold text-slate-600">
-                            <input wire:model="workflow.auto_archive_done" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                            <input wire:model="workflow.auto_archive_done" type="checkbox" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                             Arsipkan otomatis saat status selesai
                         </label>
                         <label class="flex min-h-12 items-center gap-3 rounded-lg border border-slate-200 px-3 text-sm font-bold text-slate-600">
-                            <input wire:model="workflow.notify_disposition" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                            <input wire:model="workflow.notify_disposition" type="checkbox" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                             Kirim notifikasi disposisi
                         </label>
                     </div>
 
                     <div class="mt-5 flex justify-end">
-                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Simpan Alur Kerja</button>
+                        <button type="submit" wire:loading.attr="disabled" wire:target="saveWorkflow" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800"><span class="button-label" wire:loading.remove wire:target="saveWorkflow">Simpan Alur Kerja</span><span class="button-progress" wire:loading.inline-flex wire:target="saveWorkflow"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                     </div>
                 </form>
                 @endif
@@ -1925,17 +1869,17 @@ new class extends Component
                     <form wire:submit="saveUser" class="mt-5 grid gap-4 md:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Nama Pengguna
-                            <input wire:model="userName" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="userName" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('userName') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Email
-                            <input wire:model="userEmail" type="email" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="userEmail" type="email" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('userEmail') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Role
-                            <select wire:model="userRole" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <select wire:model="userRole" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 @foreach ($userRoles as $roleName)
                                     <option value="{{ $roleName }}">{{ $roleName }}</option>
                                 @endforeach
@@ -1944,25 +1888,23 @@ new class extends Component
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Password
-                            <input wire:model="userPassword" type="password" autocomplete="new-password" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="{{ $editingUserId ? 'Kosongkan jika tidak diganti' : 'Minimal 8 karakter' }}">
+                            <input wire:model="userPassword" type="password" autocomplete="new-password" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="{{ $editingUserId ? 'Kosongkan jika tidak diganti' : 'Minimal 8 karakter' }}">
                             @error('userPassword') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="flex min-h-11 items-center gap-3 rounded-lg border border-slate-200 px-3 text-sm font-bold text-slate-600">
-                            <input wire:model="userIsActive" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                            <input wire:model="userIsActive" type="checkbox" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                             Aktif
                         </label>
                         <div class="flex flex-col gap-2 md:col-span-2 sm:flex-row sm:justify-end">
                             @if ($editingUserId)
-                                <button type="button" wire:click="resetUserForm" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal Edit</button>
+                                <button type="button" wire:click="resetUserForm" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="resetUserForm"><span class="button-label" wire:loading.remove wire:target="resetUserForm">Batal Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="resetUserForm"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             @endif
-                            <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                                {{ $editingUserId ? 'Simpan Perubahan' : 'Tambah Pengguna' }}
-                            </button>
+                            <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveUser"><span class="button-label" wire:loading.remove wire:target="saveUser">{{ $editingUserId ? 'Simpan Perubahan' : 'Tambah Pengguna' }}</span><span class="button-progress" wire:loading.inline-flex wire:target="saveUser"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                         </div>
                     </form>
 
                     <div class="mt-5 overflow-x-auto rounded-lg border border-slate-200">
-                        <table class="w-full min-w-[820px] border-collapse text-left text-sm">
+                        <table class="table table-hover w-full min-w-[820px] border-collapse text-left text-sm">
                             <thead class="bg-slate-50 text-xs uppercase text-slate-500">
                                 <tr>
                                     <th class="border-b border-slate-200 px-4 py-3">Nama</th>
@@ -1985,9 +1927,9 @@ new class extends Component
                                         </td>
                                         <td class="border-b border-slate-100 px-4 py-3">
                                             <div class="flex flex-wrap gap-2">
-                                                <button type="button" wire:click="editUser({{ $user->id }})" class="whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Edit</button>
-                                                <button type="button" wire:click="toggleUser({{ $user->id }})" class="whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">{{ $user->is_active ? 'Nonaktifkan' : 'Aktifkan' }}</button>
-                                                <button type="button" wire:click="deleteUser({{ $user->id }})" wire:confirm="Hapus pengguna ini?" class="whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50">Hapus</button>
+                                                <button type="button" wire:click="editUser({{ $user->id }})" class="btn btn-outline-secondary whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="editUser({{ $user->id }})"><span class="button-label" wire:loading.remove wire:target="editUser({{ $user->id }})">Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="editUser({{ $user->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                                <button type="button" wire:click="toggleUser({{ $user->id }})" class="btn btn-outline-secondary whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="toggleUser({{ $user->id }})"><span class="button-label" wire:loading.remove wire:target="toggleUser({{ $user->id }})">{{ $user->is_active ? 'Nonaktifkan' : 'Aktifkan' }}</span><span class="button-progress" wire:loading.inline-flex wire:target="toggleUser({{ $user->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                                <button type="button" wire:click="deleteUser({{ $user->id }})" wire:confirm="Hapus pengguna ini?" class="btn btn-outline-danger whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50" wire:loading.attr="disabled" wire:target="deleteUser({{ $user->id }})"><span class="button-label" wire:loading.remove wire:target="deleteUser({{ $user->id }})">Hapus</span><span class="button-progress" wire:loading.inline-flex wire:target="deleteUser({{ $user->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menghapus…</span></span></button>
                                             </div>
                                         </td>
                                     </tr>
@@ -2012,35 +1954,33 @@ new class extends Component
                     <form wire:submit="saveRecipient" class="mt-5 grid gap-4 md:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Nama Penerima
-                            <input wire:model="recipientName" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="recipientName" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('recipientName') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Jabatan
-                            <input wire:model="recipientPosition" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="recipientPosition" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('recipientPosition') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Unit
-                            <input wire:model="recipientUnit" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="recipientUnit" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('recipientUnit') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="flex min-h-11 items-center gap-3 rounded-lg border border-slate-200 px-3 text-sm font-bold text-slate-600">
-                            <input wire:model="recipientIsActive" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                            <input wire:model="recipientIsActive" type="checkbox" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                             Aktif
                         </label>
                         <div class="flex flex-col gap-2 md:col-span-2 sm:flex-row sm:justify-end">
                             @if ($editingRecipientId)
-                                <button type="button" wire:click="resetRecipientForm" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal Edit</button>
+                                <button type="button" wire:click="resetRecipientForm" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="resetRecipientForm"><span class="button-label" wire:loading.remove wire:target="resetRecipientForm">Batal Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="resetRecipientForm"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             @endif
-                            <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                                {{ $editingRecipientId ? 'Simpan Perubahan' : 'Tambah Penerima' }}
-                            </button>
+                            <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveRecipient"><span class="button-label" wire:loading.remove wire:target="saveRecipient">{{ $editingRecipientId ? 'Simpan Perubahan' : 'Tambah Penerima' }}</span><span class="button-progress" wire:loading.inline-flex wire:target="saveRecipient"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                         </div>
                     </form>
 
                     <div class="mt-5 overflow-x-auto rounded-lg border border-slate-200">
-                        <table class="w-full min-w-[720px] border-collapse text-left text-sm">
+                        <table class="table table-hover w-full min-w-[720px] border-collapse text-left text-sm">
                             <thead class="bg-slate-50 text-xs uppercase text-slate-500">
                                 <tr>
                                     <th class="border-b border-slate-200 px-4 py-3">Nama</th>
@@ -2063,9 +2003,9 @@ new class extends Component
                                         </td>
                                         <td class="border-b border-slate-100 px-4 py-3">
                                             <div class="flex flex-wrap gap-2">
-                                                <button type="button" wire:click="editRecipient({{ $recipient->id }})" class="whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">Edit</button>
-                                                <button type="button" wire:click="toggleRecipient({{ $recipient->id }})" class="whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600">{{ $recipient->is_active ? 'Nonaktifkan' : 'Aktifkan' }}</button>
-                                                <button type="button" wire:click="deleteRecipient({{ $recipient->id }})" wire:confirm="Hapus penerima disposisi ini?" class="whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50">Hapus</button>
+                                                <button type="button" wire:click="editRecipient({{ $recipient->id }})" class="btn btn-outline-secondary whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="editRecipient({{ $recipient->id }})"><span class="button-label" wire:loading.remove wire:target="editRecipient({{ $recipient->id }})">Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="editRecipient({{ $recipient->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                                <button type="button" wire:click="toggleRecipient({{ $recipient->id }})" class="btn btn-outline-secondary whitespace-nowrap rounded-lg border border-slate-200 px-3 py-1.5 font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="toggleRecipient({{ $recipient->id }})"><span class="button-label" wire:loading.remove wire:target="toggleRecipient({{ $recipient->id }})">{{ $recipient->is_active ? 'Nonaktifkan' : 'Aktifkan' }}</span><span class="button-progress" wire:loading.inline-flex wire:target="toggleRecipient({{ $recipient->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                                <button type="button" wire:click="deleteRecipient({{ $recipient->id }})" wire:confirm="Hapus penerima disposisi ini?" class="btn btn-outline-danger whitespace-nowrap rounded-lg border border-rose-200 px-3 py-1.5 font-bold text-rose-700 hover:bg-rose-50" wire:loading.attr="disabled" wire:target="deleteRecipient({{ $recipient->id }})"><span class="button-label" wire:loading.remove wire:target="deleteRecipient({{ $recipient->id }})">Hapus</span><span class="button-progress" wire:loading.inline-flex wire:target="deleteRecipient({{ $recipient->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menghapus…</span></span></button>
                                             </div>
                                         </td>
                                     </tr>
@@ -2090,28 +2030,28 @@ new class extends Component
                     <form wire:submit="saveMobileAndroid" class="mt-5 grid gap-4 md:grid-cols-2">
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Nama Versi Saat Ini
-                            <input wire:model="mobileAndroid.current_version_name" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: 1.0.0">
+                            <input wire:model="mobileAndroid.current_version_name" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: 1.0.0">
                             @error('mobileAndroid.current_version_name') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Kode Versi Saat Ini
-                            <input wire:model="mobileAndroid.current_version_code" type="number" min="1" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="mobileAndroid.current_version_code" type="number" min="1" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             @error('mobileAndroid.current_version_code') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Kode Versi Minimum
-                            <input wire:model="mobileAndroid.minimum_version_code" type="number" min="1" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <input wire:model="mobileAndroid.minimum_version_code" type="number" min="1" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                             <span class="text-xs font-normal text-slate-500">Jika versi aplikasi di bawah angka ini, update menjadi wajib.</span>
                             @error('mobileAndroid.minimum_version_code') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Link Unduh APK
-                            <input wire:model="mobileAndroid.download_url" type="url" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="https://esurat.simpelmrp.com/downloads/esurat-android.apk">
+                            <input wire:model="mobileAndroid.download_url" type="url" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="https://esurat.simpelmrp.com/downloads/esurat-android.apk">
                             @error('mobileAndroid.download_url') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600 md:col-span-2">
                             Catatan Rilis
-                            <textarea wire:model="mobileAndroid.release_notes" rows="4" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Ringkasan perubahan versi Android terbaru."></textarea>
+                            <textarea wire:model="mobileAndroid.release_notes" rows="4" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Ringkasan perubahan versi Android terbaru."></textarea>
                             @error('mobileAndroid.release_notes') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
 
@@ -2124,7 +2064,7 @@ new class extends Component
                         </div>
 
                         <div class="flex justify-end md:col-span-2">
-                            <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Simpan Setting Android</button>
+                            <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveMobileAndroid"><span class="button-label" wire:loading.remove wire:target="saveMobileAndroid">Simpan Setting Android</span><span class="button-progress" wire:loading.inline-flex wire:target="saveMobileAndroid"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                         </div>
                     </form>
                 </section>
@@ -2157,7 +2097,7 @@ new class extends Component
                                             <div class="font-bold">{{ $role['name'] }}</div>
                                             <p class="mt-1 text-sm text-slate-500">{{ $role['description'] }}</p>
                                         </div>
-                                        <button type="button" wire:click="removeRole({{ $index }})" class="rounded-lg border border-rose-200 px-2 py-1 text-xs font-bold text-rose-700 hover:bg-rose-50">Hapus</button>
+                                        <button type="button" wire:click="removeRole({{ $index }})" class="btn btn-outline-danger rounded-lg border border-rose-200 px-2 py-1 text-xs font-bold text-rose-700 hover:bg-rose-50" wire:loading.attr="disabled" wire:target="removeRole({{ $index }})"><span class="button-label" wire:loading.remove wire:target="removeRole({{ $index }})">Hapus</span><span class="button-progress" wire:loading.inline-flex wire:target="removeRole({{ $index }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menghapus…</span></span></button>
                                     </div>
                                 </div>
                             @endforeach
@@ -2166,15 +2106,15 @@ new class extends Component
                         <form wire:submit="addRole" class="mt-4 space-y-3 rounded-lg bg-slate-50 p-3">
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Nama Peran
-                                <input wire:model="newRoleName" type="text" class="min-h-10 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <input wire:model="newRoleName" type="text" class="form-control min-h-10 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 @error('newRoleName') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Deskripsi
-                                <textarea wire:model="newRoleDescription" rows="3" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950"></textarea>
+                                <textarea wire:model="newRoleDescription" rows="3" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950"></textarea>
                                 @error('newRoleDescription') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
-                            <button type="submit" class="min-h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold hover:border-teal-600">Tambah Peran</button>
+                            <button type="submit" class="btn btn-outline-secondary min-h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="addRole"><span class="button-label" wire:loading.remove wire:target="addRole">Tambah Peran</span><span class="button-progress" wire:loading.inline-flex wire:target="addRole"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                         </form>
                     </section>
                 @endif
@@ -2206,11 +2146,6 @@ new class extends Component
             </aside>
             @endif
         </section>
-    </main>
+    </section>
 
-    <div x-show="showToast"
-         x-transition
-         x-cloak
-         class="fixed bottom-6 right-6 z-30 max-w-sm rounded-lg bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg"
-         x-text="toast"></div>
 </div>

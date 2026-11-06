@@ -3,6 +3,8 @@
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#162c46">
+        <script>document.documentElement.classList.add('js'); window.esuratInitialLoaderTimeout = window.setTimeout(() => document.getElementById('page-loader')?.setAttribute('hidden', ''), 10000);</script>
         <title>{{ \App\Models\AppSetting::agency()['app_name'] }} | Manajemen Arsip Surat</title>
 
         <link rel="icon" type="image/x-icon" href="/favicon.ico">
@@ -13,8 +15,9 @@
         @vite(['resources/css/app.css', 'resources/js/app.js'])
         @livewireStyles
     </head>
-    <body class="bg-slate-100 text-slate-900 antialiased">
-        <livewire:dashboard />
+    <body class="app-body bg-slate-100 text-slate-900 antialiased">
+        <x-ui-feedback />
+        <livewire:workspace />
         @livewireScripts
     </body>
 </html>

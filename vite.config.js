@@ -21,4 +21,12 @@ export default defineConfig({
             ignored: ['**/storage/framework/views/**'],
         },
     },
+    css: {
+        preprocessorOptions: {
+            scss: {
+                silenceDeprecations: ['import', 'global-builtin', 'color-functions', 'if-function'],
+                quietDeps: true,
+            },
+        },
+    },
 });

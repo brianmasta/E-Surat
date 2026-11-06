@@ -40,35 +40,35 @@ Route::get('/', function () {
 Route::get('/monitoring-nomor-surat', function () {
     abort_unless(auth()->user()?->isAdmin(), 403);
 
-    return view('number-monitor');
+    return redirect()->route('dashboard', ['view' => 'monitoring']);
 })->middleware('auth')->name('number-monitor');
 
 Route::get('/penomoran-sk', function () {
     abort_unless(auth()->user()?->isAdmin(), 403);
 
-    return view('sk-numbering');
+    return redirect()->route('dashboard', ['view' => 'sk']);
 })->middleware('auth')->name('sk-numbering');
 
 Route::get('/tracking-surat', function () {
-    return view('tracking');
+    return redirect()->route('dashboard', ['view' => 'pelacakan']);
 })->middleware('auth')->name('tracking');
 
 Route::get('/tugas-saya', function () {
-    return view('my-tasks');
+    return redirect()->route('dashboard', ['view' => 'tugas']);
 })->middleware('auth')->name('my-tasks');
 
 Route::get('/pimpinan', function () {
     $user = auth()->user();
     abort_unless($user?->isAdmin() || $user?->isLeader() || $user?->isPersonalSecretary(), 403);
 
-    return view('leadership');
+    return redirect()->route('dashboard', ['view' => 'disposisi']);
 })->middleware('auth')->name('leadership');
 
 Route::get('/kepala-bagian', function () {
     $user = auth()->user();
-    abort_unless($user?->isAdmin() || $user?->isDepartmentHead(), 403);
+    abort_unless($user?->isAdmin() || $user?->isDepartmentHead() || $user?->isStaff(), 403);
 
-    return view('department-head');
+    return redirect()->route('dashboard', ['view' => 'tindak-lanjut']);
 })->middleware('auth')->name('department-head');
 
 Route::get('/letters/{letter}/document', function (Letter $letter) {
@@ -189,6 +189,7 @@ Route::get('/letters/export/csv', function () {
     ];
 
     $letters = Letter::query()
+        ->visibleTo(auth()->user())
         ->with('classification')
         ->applyDashboardFilters($filters)
         ->latest('letter_date')
@@ -308,5 +309,5 @@ Route::get('/archive-classifications/import-template', function () {
 Route::get('/settings', function () {
     abort_unless(auth()->user()?->isAdmin(), 403);
 
-    return view('settings');
+    return redirect()->route('dashboard', ['view' => 'pengaturan', 'tab' => request('tab', 'profil')]);
 })->middleware('auth')->name('settings');

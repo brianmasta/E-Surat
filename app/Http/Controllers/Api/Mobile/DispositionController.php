@@ -18,6 +18,7 @@ class DispositionController extends Controller
     {
         $user = $request->user();
         $status = $request->query('status', 'Semua');
+        $search = trim((string) $request->query('search', ''));
 
         $dispositions = Disposition::query()
             ->with('letter.classification', 'children')
@@ -28,6 +29,20 @@ class DispositionController extends Controller
             })
             ->when($user?->isDepartmentHead(), fn ($query) => $query->where('recipient_name', $user->name))
             ->when($status !== 'Semua', fn ($query) => $query->where('status', $status))
+            ->when($search !== '', function ($query) use ($search) {
+                $query->where(function ($query) use ($search) {
+                    $query
+                        ->where('instruction', 'like', '%'.$search.'%')
+                        ->orWhere('sender_name', 'like', '%'.$search.'%')
+                        ->orWhere('recipient_name', 'like', '%'.$search.'%')
+                        ->orWhereHas('letter', function ($query) use ($search) {
+                            $query
+                                ->where('number', 'like', '%'.$search.'%')
+                                ->orWhere('subject', 'like', '%'.$search.'%')
+                                ->orWhere('external_party', 'like', '%'.$search.'%');
+                        });
+                });
+            })
             ->latest()
             ->paginate((int) $request->query('per_page', 15));
 

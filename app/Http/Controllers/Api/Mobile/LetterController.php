@@ -127,7 +127,7 @@ class LetterController extends Controller
         ]);
 
         if ($validated['type'] === 'Keluar') {
-            LetterNumbering::advanceNextLetterSequence($number);
+            LetterNumbering::advanceNextLetterSequence($number, $unitCode);
         }
 
         $this->storeFiles($letter, 'Lampiran', $request->file('attachments', []));

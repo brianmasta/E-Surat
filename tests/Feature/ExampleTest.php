@@ -292,11 +292,11 @@ class ExampleTest extends TestCase
     {
         $this->actingAs(User::where('role', 'Pimpinan MRP')->first());
 
-        $this->get('/pimpinan')->assertOk();
+        $this->get('/?view=disposisi')->assertOk();
 
         $this->actingAs(User::where('role', 'Sekretaris Pribadi')->first());
 
-        $this->get('/pimpinan')->assertOk();
+        $this->get('/?view=disposisi')->assertOk();
 
         $this->actingAs(User::where('role', 'Staf Sekretariat')->first());
 
@@ -307,11 +307,11 @@ class ExampleTest extends TestCase
     {
         $this->actingAs(User::where('role', 'Kepala Bagian')->first());
 
-        $this->get('/kepala-bagian')->assertOk();
+        $this->get('/?view=tindak-lanjut')->assertOk();
 
         $this->actingAs(User::where('role', 'Staf Sekretariat')->first());
 
-        $this->get('/kepala-bagian')->assertForbidden();
+        $this->get('/?view=tindak-lanjut')->assertOk();
 
         $this->actingAs(User::where('role', 'Pimpinan MRP')->first());
 
@@ -320,37 +320,23 @@ class ExampleTest extends TestCase
 
     public function test_dashboard_menu_is_limited_by_role(): void
     {
-        $this->actingAs(User::where('role', 'Staf Sekretariat')->first());
+        foreach (['Staf Sekretariat', 'Kepala Bagian'] as $role) {
+            $this->actingAs(User::where('role', $role)->first());
+            $this->get('/')->assertOk()
+                ->assertSee('Tindak Lanjut Disposisi')
+                ->assertDontSee('Disposisi Mandiri')
+                ->assertDontSee('Input Surat Masuk')
+                ->assertDontSee('Pengaturan');
+        }
 
-        $this->get('/')
-            ->assertOk()
-            ->assertDontSee('Halaman Pimpinan')
-            ->assertDontSee('Halaman Kepala Bagian')
-            ->assertDontSee('Setting');
-
-        $this->actingAs(User::where('role', 'Pimpinan MRP')->first());
-
-        $this->get('/')
-            ->assertOk()
-            ->assertSee('Halaman Pimpinan')
-            ->assertDontSee('Halaman Kepala Bagian')
-            ->assertDontSee('Setting');
-
-        $this->actingAs(User::where('role', 'Sekretaris Pribadi')->first());
-
-        $this->get('/')
-            ->assertOk()
-            ->assertSee('Halaman Pimpinan')
-            ->assertDontSee('Halaman Kepala Bagian')
-            ->assertDontSee('Setting');
-
-        $this->actingAs(User::where('role', 'Kepala Bagian')->first());
-
-        $this->get('/')
-            ->assertOk()
-            ->assertSee('Halaman Kepala Bagian')
-            ->assertDontSee('Halaman Pimpinan')
-            ->assertDontSee('Setting');
+        foreach (['Pimpinan MRP', 'Sekretaris Pribadi'] as $role) {
+            $this->actingAs(User::where('role', $role)->first());
+            $this->get('/')->assertOk()
+                ->assertSee('Disposisi Mandiri')
+                ->assertDontSee('Tindak Lanjut Disposisi')
+                ->assertDontSee('Input Surat Masuk')
+                ->assertDontSee('Pengaturan');
+        }
     }
 
     public function test_leader_inbox_shows_incoming_letters_waiting_for_disposition(): void
@@ -374,7 +360,7 @@ class ExampleTest extends TestCase
 
         $this->assertGreaterThanOrEqual(1, TaskInbox::countFor($leader));
 
-        $this->get('/tugas-saya')
+        $this->get('/?view=tugas')
             ->assertOk()
             ->assertSee('Inbox / Tugas Saya')
             ->assertSee('Surat perlu disposisi inbox')
@@ -396,7 +382,7 @@ class ExampleTest extends TestCase
 
         $this->assertGreaterThanOrEqual(1, TaskInbox::countFor($departmentHead));
 
-        $this->get('/tugas-saya')
+        $this->get('/?view=tugas')
             ->assertOk()
             ->assertSee('Disposisi untuk Saya')
             ->assertSee('Mohon tindak lanjuti dari inbox.');
@@ -496,7 +482,7 @@ class ExampleTest extends TestCase
         Livewire::test('dashboard')
             ->call('openLetterForm', 'Keluar')
             ->assertSet('unitCode', 'BUP')
-            ->assertSet('number', '800/019/BUP/'.now()->format('m').'/'.now()->format('Y'));
+            ->assertSet('number', '800/001/BUP/'.now()->format('m').'/'.now()->format('Y'));
 
         Livewire::test('settings')
             ->call('setSettingsTab', 'unit')
@@ -524,7 +510,7 @@ class ExampleTest extends TestCase
         Livewire::test('dashboard')
             ->call('openLetterForm', 'Keluar')
             ->assertSet('unitCode', 'BAG UMUM')
-            ->assertSet('number', '800/019/BAG UMUM/'.now()->format('m').'/'.now()->format('Y'));
+            ->assertSet('number', '800/001/BAG UMUM/'.now()->format('m').'/'.now()->format('Y'));
     }
 
     public function test_archive_classification_codes_can_be_managed_in_settings(): void
@@ -785,8 +771,8 @@ class ExampleTest extends TestCase
         ]);
 
         Livewire::test('dashboard')
-            ->call('openLetterForm', 'Keluar', 'MRP')
-            ->assertSet('number', '900/042/MRP/'.now()->format('m').'/'.now()->format('Y'));
+            ->call('openLetterForm', 'Keluar', 'SET-MRP')
+            ->assertSet('number', '900/042/SET-MRP/'.now()->format('m').'/'.now()->format('Y'));
     }
 
     public function test_outgoing_letter_jump_updates_next_sequence(): void
@@ -855,7 +841,7 @@ class ExampleTest extends TestCase
             ->set('numberMonitorCheck', '4')
             ->assertSee('Monitoring Nomor Surat Keluar')
             ->assertSee('Histori Tanggal Nomor Terpakai')
-            ->assertSee('Tanggal surat:')
+            ->assertSee('Tanggal Surat')
             ->assertSee('Rekomendasi tanggal lama')
             ->assertSee($letterDates[3]->translatedFormat('d M Y'))
             ->assertSee('Pakai')
@@ -896,7 +882,7 @@ class ExampleTest extends TestCase
             ]);
         }
 
-        $this->get('/monitoring-nomor-surat')
+        $this->get('/?view=monitoring')
             ->assertOk()
             ->assertSee('Monitoring Nomor Surat');
 
@@ -949,7 +935,7 @@ class ExampleTest extends TestCase
             'created_by' => $admin->id,
         ]);
 
-        $this->get('/penomoran-sk')
+        $this->get('/?view=sk')
             ->assertOk()
             ->assertSee('Penomoran Surat Keputusan');
 
@@ -1109,7 +1095,7 @@ class ExampleTest extends TestCase
             ->assertSee('Dasbor Persuratan')
             ->assertDontSee('Monitoring Surat');
 
-        $this->get('/monitoring-nomor-surat')
+        $this->get('/?view=monitoring')
             ->assertOk()
             ->assertSee('Monitoring Nomor Surat');
     }
@@ -1863,9 +1849,9 @@ class ExampleTest extends TestCase
             'updated_at' => now()->subMinutes(10),
         ]);
 
-        $this->get('/tracking-surat')
+        $this->get('/?view=pelacakan')
             ->assertOk()
-            ->assertSee('Tracking Surat');
+            ->assertSee('Pelacakan Surat');
 
         Livewire::test('letter-tracking-page')
             ->set('search', 'TRK/001')

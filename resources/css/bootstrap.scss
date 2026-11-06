@@ -1,0 +1,26 @@
+// Import components without Bootstrap's spacing/grid utilities so existing
+// Livewire screens can keep their responsive Tailwind layout.
+@import 'bootstrap/scss/functions';
+$primary: #0d9488;
+$font-family-sans-serif: 'Instrument Sans', system-ui, sans-serif;
+$border-radius: .75rem;
+$border-radius-lg: 1rem;
+$input-btn-focus-width: .2rem;
+$input-btn-focus-color: rgba($primary, .16);
+@import 'bootstrap/scss/variables';
+@import 'bootstrap/scss/variables-dark';
+@import 'bootstrap/scss/maps';
+@import 'bootstrap/scss/mixins';
+
+@layer bootstrap {
+    @import 'bootstrap/scss/root';
+    @import 'bootstrap/scss/buttons';
+    @import 'bootstrap/scss/forms';
+    @import 'bootstrap/scss/tables';
+    @import 'bootstrap/scss/card';
+    @import 'bootstrap/scss/badge';
+    @import 'bootstrap/scss/transitions';
+    @import 'bootstrap/scss/close';
+    @import 'bootstrap/scss/spinners';
+    @import 'bootstrap/scss/toasts';
+}

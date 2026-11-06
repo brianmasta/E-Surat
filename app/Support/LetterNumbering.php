@@ -5,13 +5,14 @@ namespace App\Support;
 use App\Models\AppSetting;
 use App\Models\Letter;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
 class LetterNumbering
 {
     public static function nextLetterNumber(?string $unitCode = null, ?string $classificationCode = null): string
     {
         $unitCode = static::normalizeUnitCode($unitCode);
-        $numbering = static::settings();
+        $numbering = static::settings($unitCode);
         $separator = $numbering['separator'];
         $parts = [
             $classificationCode ?: $numbering['prefix'],
@@ -43,43 +44,37 @@ class LetterNumbering
         return 'AG/'.$unitCode.'/'.$year.'/'.str_pad((string) $next, 4, '0', STR_PAD_LEFT);
     }
 
-    public static function advanceNextLetterSequence(string $number): void
+    public static function advanceNextLetterSequence(string $number, ?string $unitCode = null): void
     {
-        $numbering = AppSetting::getValue('letter_numbering', [
-            'prefix' => '800',
-            'unit_code' => AppSetting::defaultLetterUnitCode(),
-            'separator' => '/',
-            'include_month' => true,
-            'include_year' => true,
-            'next_sequence' => 1,
-        ]);
+        DB::transaction(function () use ($number, $unitCode) {
+            $setting = AppSetting::where('key', 'letter_numbering')->lockForUpdate()->first();
+            $numbering = $setting?->value ?? [];
+            $separator = (string) ($numbering['separator'] ?? '/');
+            $parts = $separator !== '' ? explode($separator, $number) : [];
+            $sequence = isset($parts[1]) && ctype_digit($parts[1]) ? (int) $parts[1] : null;
 
-        $separator = (string) ($numbering['separator'] ?? '/');
-        $parts = $separator !== '' ? explode($separator, $number) : [];
-        $sequence = isset($parts[1]) && ctype_digit($parts[1]) ? (int) $parts[1] : null;
+            if ($sequence === null) {
+                return;
+            }
 
-        if ($sequence === null) {
-            return;
-        }
+            $unitCode = static::normalizeUnitCode($unitCode ?? ($parts[2] ?? null));
+            $sequences = static::unitSequences($numbering);
+            $sequences[$unitCode] = max($sequences[$unitCode], $sequence + 1);
+            $selectedUnit = static::normalizeUnitCode($numbering['unit_code'] ?? null);
 
-        AppSetting::putValue('letter_numbering', [
-            ...$numbering,
-            'next_sequence' => max((int) ($numbering['next_sequence'] ?? 1), $sequence + 1),
-        ]);
+            AppSetting::putValue('letter_numbering', [
+                ...$numbering,
+                'unit_sequences' => $sequences,
+                'next_sequence' => $sequences[$selectedUnit],
+            ]);
+        });
     }
 
     public static function monitor(?string $unitCode = null, ?int $year = null, ?int $checkSequence = null): array
     {
         $unitCode = static::normalizeUnitCode($unitCode);
         $year = $year ?: (int) now()->format('Y');
-        $numbering = AppSetting::getValue('letter_numbering', [
-            'prefix' => '800',
-            'separator' => '/',
-            'include_month' => true,
-            'include_year' => true,
-            'next_sequence' => 1,
-        ]);
-        $nextSequence = max(1, (int) ($numbering['next_sequence'] ?? 1));
+        $nextSequence = static::settings($unitCode)['next_sequence'];
 
         $used = Letter::query()
             ->where('type', 'Keluar')
@@ -212,7 +207,7 @@ class LetterNumbering
             return null;
         }
 
-        $separator = static::settings()['separator'];
+        $separator = (string) (AppSetting::getValue('letter_numbering')['separator'] ?? '/');
         $parts = $separator !== '' ? explode($separator, $number) : [];
 
         return isset($parts[1]) && ctype_digit($parts[1]) ? (int) $parts[1] : null;
@@ -260,7 +255,37 @@ class LetterNumbering
         return "Dengan hormat,\n\nSehubungan dengan perihal tersebut di atas, bersama ini kami sampaikan surat ini untuk menjadi perhatian dan tindak lanjut sebagaimana mestinya.\n\nDemikian disampaikan. Atas perhatian dan kerja samanya, kami ucapkan terima kasih.";
     }
 
-    public static function settings(): array
+    public static function unitSequences(?array $numbering = null): array
+    {
+        $numbering ??= AppSetting::getValue('letter_numbering');
+        $sequences = [];
+        $legacyUnit = static::normalizeUnitCode($numbering['unit_code'] ?? null);
+        $separator = (string) ($numbering['separator'] ?? '/');
+
+        foreach (AppSetting::letterUnitCodes() as $unitCode) {
+            if (isset($numbering['unit_sequences'][$unitCode])) {
+                $sequences[$unitCode] = max(1, (int) $numbering['unit_sequences'][$unitCode]);
+            } elseif (! array_key_exists('unit_sequences', $numbering) && $unitCode === $legacyUnit) {
+                // Preserve the existing configured counter for its original unit.
+                $sequences[$unitCode] = max(1, (int) ($numbering['next_sequence'] ?? 1));
+            } else {
+                // Other existing units continue their own history, never the
+                // shared legacy counter. A unit without letters starts at 001.
+                $maximum = Letter::where('type', 'Keluar')->where('unit_code', $unitCode)
+                    ->pluck('number')
+                    ->map(function (string $number) use ($separator) {
+                        $parts = $separator !== '' ? explode($separator, $number) : [];
+
+                        return isset($parts[1]) && ctype_digit($parts[1]) ? (int) $parts[1] : 0;
+                    })->max() ?? 0;
+                $sequences[$unitCode] = $maximum + 1;
+            }
+        }
+
+        return $sequences;
+    }
+
+    public static function settings(?string $unitCode = null): array
     {
         $numbering = AppSetting::getValue('letter_numbering', [
             'prefix' => '800',
@@ -275,7 +300,7 @@ class LetterNumbering
             'separator' => (string) ($numbering['separator'] ?? '/'),
             'include_month' => (bool) ($numbering['include_month'] ?? true),
             'include_year' => (bool) ($numbering['include_year'] ?? true),
-            'next_sequence' => max(1, (int) ($numbering['next_sequence'] ?? 1)),
+            'next_sequence' => static::unitSequences($numbering)[static::normalizeUnitCode($unitCode)],
         ];
     }
 }

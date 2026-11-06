@@ -139,4 +139,22 @@ class Letter extends Model
                 });
             });
     }
+
+    public function scopeVisibleTo(Builder $query, ?User $user): Builder
+    {
+        if (! $user?->is_active) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        if ($user->isAdmin() || $user->isLeader() || $user->isPersonalSecretary() || $user->isStaff()) {
+            return $query;
+        }
+
+        if ($user->isDepartmentHead()) {
+            return $query->whereHas('dispositions', fn (Builder $dispositions) => $dispositions
+                ->where(fn (Builder $assigned) => $assigned->where('recipient_name', $user->name)->orWhere('sender_name', $user->name)));
+        }
+
+        return $query->whereRaw('1 = 0');
+    }
 }

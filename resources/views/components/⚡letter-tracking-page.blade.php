@@ -6,11 +6,19 @@ use App\Models\Disposition;
 use App\Models\Letter;
 use App\Models\LetterApproval;
 use App\Support\TaskInbox;
+use App\Livewire\Concerns\WorkspacePanel;
 use Livewire\Component;
 use Livewire\WithPagination;
 
 new class extends Component
 {
+    use WorkspacePanel;
+
+    protected function workspacePage(): string
+    {
+        return 'pelacakan';
+    }
+
     use WithPagination;
 
     public string $search = '';
@@ -27,19 +35,26 @@ new class extends Component
 
     public function mount(): void
     {
-        $this->selectedLetterId = Letter::latest('letter_date')->latest()->value('id');
+        $this->selectedLetterId = Letter::visibleTo(auth()->user())->latest('letter_date')->latest()->value('id');
     }
 
     public function updated(string $property): void
     {
-        if (in_array($property, ['search', 'typeFilter', 'statusFilter'], true)) {
+        if (in_array($property, ['search', 'typeFilter', 'statusFilter', 'perPage'], true)) {
             $this->resetPage();
         }
+    }
+
+    public function resetFilters(): void
+    {
+        $this->reset('search', 'typeFilter', 'statusFilter');
+        $this->resetPage();
     }
 
     public function letters()
     {
         return Letter::query()
+            ->visibleTo(auth()->user())
             ->with('classification')
             ->when($this->typeFilter !== 'Semua', fn ($query) => $query->where('type', $this->typeFilter))
             ->when($this->statusFilter !== 'Semua', function ($query) {
@@ -67,12 +82,13 @@ new class extends Component
     public function selectedLetter(): ?Letter
     {
         return $this->selectedLetterId
-            ? Letter::with('classification', 'attachments', 'dispositions.children', 'approvals')->find($this->selectedLetterId)
+            ? Letter::visibleTo(auth()->user())->with('classification', 'attachments', 'dispositions.children', 'approvals')->find($this->selectedLetterId)
             : null;
     }
 
     public function selectLetter(int $letterId): void
     {
+        abort_unless(Letter::visibleTo(auth()->user())->whereKey($letterId)->exists(), 404);
         $this->selectedLetterId = $letterId;
         $this->showDetailModal = true;
     }
@@ -251,7 +267,7 @@ new class extends Component
 };
 ?>
 
-<div class="min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
+<div class="{{ $embedded ? 'workspace-panel' : 'app-shell min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]' }}">
     @php
         $currentUser = auth()->user();
         $agencyProfile = AppSetting::agency();
@@ -261,6 +277,7 @@ new class extends Component
         $steps = $this->trackingSteps($selectedLetter);
     @endphp
 
+    @unless ($embedded)
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
             <x-app-logo class="h-11 w-11" />
@@ -271,26 +288,26 @@ new class extends Component
         </div>
 
         <nav class="mt-8 grid gap-2">
-            <a href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor</a>
-            <a href="{{ route('tracking') }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
-            <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+            <a data-page-link href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'pelacakan']) }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'tugas']) }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                 <span class="inline-flex items-center gap-2"><x-icon name="task" class="h-4 w-4" />Tugas Saya</span>
                 @if ($taskCount > 0)
                     <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
                 @endif
             </a>
             @if ($currentUser?->isAdmin())
-                <a href="{{ route('number-monitor') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
-                <a href="{{ route('sk-numbering') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'monitoring']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'sk']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
             @endif
             @if ($currentUser?->isAdmin() || $currentUser?->isLeader() || $currentUser?->isPersonalSecretary())
-                <a href="{{ route('leadership') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Halaman Pimpinan</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'disposisi']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Halaman Pimpinan</a>
             @endif
             @if ($currentUser?->isAdmin() || $currentUser?->isDepartmentHead())
-                <a href="{{ route('department-head') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="users" class="h-4 w-4" />Halaman Kepala Bagian</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'tindak-lanjut']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="users" class="h-4 w-4" />Halaman Kepala Bagian</a>
             @endif
             @if ($currentUser?->isAdmin())
-                <a href="{{ route('settings') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'pengaturan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
             @endif
         </nav>
 
@@ -299,76 +316,124 @@ new class extends Component
             <div class="text-xs text-slate-400">{{ $currentUser->role }}</div>
         </div>
     </aside>
+    @endunless
 
-    <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
+    <section class="panel-main tracking-page {{ $embedded ? 'workspace-panel-main' : 'min-w-0 px-4 py-6 sm:px-6 lg:px-8' }}">
+        @unless ($embedded)
         <header class="sticky top-0 z-10 -mx-4 flex flex-col gap-4 border-b border-slate-200 bg-slate-100/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 xl:flex-row xl:items-start xl:justify-between">
             <div>
                 <p class="text-xs font-bold uppercase text-teal-700">Pelacakan</p>
-                <h1 class="mt-1 text-3xl font-bold tracking-normal text-slate-950">Tracking Surat</h1>
+                <h1 class="mt-1 text-3xl font-bold tracking-normal text-slate-950">Pelacakan Surat</h1>
                 <p class="mt-2 max-w-2xl text-sm text-slate-600">Cari dan pantau posisi surat masuk atau keluar berdasarkan nomor, agenda, perihal, dan pihak luar.</p>
             </div>
             <form method="POST" action="{{ route('logout') }}">
                 @csrf
-                <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
-                    <x-icon name="logout" class="mr-2 h-4 w-4" />
-                    Logout
-                </button>
+                <button type="submit" class="btn btn-outline-secondary inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500"><span class="button-label"><x-icon name="logout" class="mr-2 h-4 w-4" />
+                    Logout</span><span class="button-progress" style="display: none;"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
             </form>
         </header>
+        @endunless
 
-        <section class="mt-6 grid gap-3 rounded-lg border border-slate-200 bg-white p-5 shadow-sm lg:grid-cols-[minmax(0,1fr)_180px_220px]">
-            <label class="grid gap-1 text-sm font-bold text-slate-600">
-                Cari Surat
-                <input wire:model.live.debounce.300ms="search" type="search" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Nomor surat, agenda, perihal, pengirim...">
-            </label>
-            <label class="grid gap-1 text-sm font-bold text-slate-600">
-                Jenis
-                <select wire:model.live="typeFilter" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
-                    <option>Semua</option>
-                    <option>Masuk</option>
-                    <option>Keluar</option>
-                </select>
-            </label>
-            <label class="grid gap-1 text-sm font-bold text-slate-600">
-                Status
-                <select wire:model.live="statusFilter" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
-                    @foreach ($this->statuses() as $status)
-                        <option value="{{ $status }}">{{ $status }}</option>
-                    @endforeach
-                </select>
-            </label>
+        <section class="tracking-filters rounded-lg border border-slate-200 bg-white shadow-sm" aria-labelledby="tracking-filter-title">
+            <div class="tracking-section-heading">
+                <span class="tracking-section-icon"><x-icon name="route" class="h-5 w-5" /></span>
+                <div>
+                    <h2 id="tracking-filter-title" class="text-sm font-bold text-slate-900">Telusuri perjalanan surat</h2>
+                    <p class="mt-1 text-xs text-slate-500">Cari surat dan buka detail untuk melihat posisi serta riwayat prosesnya.</p>
+                </div>
+            </div>
+            <div class="tracking-filter-grid">
+                <label class="tracking-field tracking-search-field">
+                    <span>Cari surat</span>
+                    <span class="tracking-search-input">
+                        <x-icon name="search" class="h-4 w-4" />
+                        <input wire:model.live.debounce.300ms="search" type="search" class="form-control" placeholder="Nomor, agenda, perihal, atau pihak luar">
+                    </span>
+                </label>
+                <label class="tracking-field">
+                    <span>Jenis surat</span>
+                    <select wire:model.live="typeFilter" class="form-select">
+                        <option value="Semua">Semua jenis</option>
+                        <option value="Masuk">Surat masuk</option>
+                        <option value="Keluar">Surat keluar</option>
+                    </select>
+                </label>
+                <label class="tracking-field">
+                    <span>Status surat</span>
+                    <select wire:model.live="statusFilter" class="form-select">
+                        @foreach ($this->statuses() as $status)
+                            <option value="{{ $status }}">{{ $status === 'Semua' ? 'Semua status' : $status }}</option>
+                        @endforeach
+                    </select>
+                </label>
+            </div>
+            @if ($search !== '' || $typeFilter !== 'Semua' || $statusFilter !== 'Semua')
+                <div class="tracking-filter-summary">
+                    <span class="text-xs text-slate-500">Filter pencarian aktif</span>
+                    <button type="button" wire:click="resetFilters" wire:loading.attr="disabled" class="tracking-reset">Reset pencarian</button>
+                </div>
+            @endif
         </section>
 
-        <section class="mt-5">
-            <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-                <div class="border-b border-slate-200 p-5">
-                    <h2 class="text-lg font-bold">Hasil Pencarian</h2>
-                    <p class="text-sm text-slate-500">{{ $letters->total() }} surat ditemukan.</p>
+        <section class="mt-5" aria-labelledby="tracking-results-title">
+            <div class="tracking-results overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                <div class="tracking-results-heading">
+                    <div>
+                        <h2 id="tracking-results-title" class="inline-flex items-center gap-2 text-sm font-bold">Daftar Surat <span class="tracking-count">{{ number_format($letters->total(), 0, ',', '.') }}</span></h2>
+                        <p class="mt-1 text-xs text-slate-500" role="status">{{ $letters->total() }} surat ditemukan.</p>
+                    </div>
+                    <label class="tracking-page-size">
+                        <span>Tampilkan</span>
+                        <select wire:model.live="perPage" class="form-select" aria-label="Jumlah surat per halaman">
+                            <option value="10">10</option>
+                            <option value="25">25</option>
+                            <option value="50">50</option>
+                        </select>
+                        <span>per halaman</span>
+                    </label>
                 </div>
-                <div class="divide-y divide-slate-100">
+                @if ($letters->isNotEmpty())
+                    <div class="tracking-list-columns" aria-hidden="true">
+                        <span>Nomor & perihal surat</span><span>Jenis / unit</span><span>Tanggal surat</span><span>Status</span><span></span>
+                    </div>
+                @endif
+                <div class="tracking-list" wire:loading.class="opacity-60" wire:target="search,typeFilter,statusFilter,perPage,resetFilters,gotoPage,nextPage,previousPage">
                     @forelse ($letters as $letter)
                         <button type="button"
+                                wire:key="tracking-letter-{{ $letter->id }}"
                                 wire:click="selectLetter({{ $letter->id }})"
-                                class="grid w-full gap-2 px-5 py-4 text-left transition hover:bg-slate-50">
-                            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                                <div>
-                                    <div class="font-bold">{{ $letter->number }}</div>
-                                    <div class="mt-1 text-sm text-slate-600">{{ $letter->subject }}</div>
-                                </div>
-                                <span class="inline-flex w-fit items-center gap-1 rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($letter->status) }}">
+                                class="tracking-letter-row" wire:loading.attr="disabled" wire:target="selectLetter"
+                                aria-label="Lacak surat {{ $letter->number }}: {{ $letter->subject }}" aria-haspopup="dialog">
+                            <span class="tracking-letter-main">
+                                <span class="tracking-letter-number">{{ $letter->number }}</span>
+                                <span class="tracking-letter-subject">{{ $letter->subject }}</span>
+                                <span class="tracking-letter-party"><x-icon name="user" class="h-3.5 w-3.5" />{{ $letter->external_party ?: '-' }}</span>
+                            </span>
+                            <span class="tracking-letter-type">
+                                <span class="inline-flex items-center gap-1.5 font-semibold {{ $letter->type === 'Keluar' ? 'text-sky-700' : 'text-teal-700' }}"><x-icon :name="$letter->type === 'Keluar' ? 'outbox' : 'inbox'" class="h-4 w-4" />{{ $letter->type }}</span>
+                                <span class="text-xs text-slate-500">{{ $letter->unit_code }}</span>
+                            </span>
+                            <span class="tracking-letter-date"><x-icon name="calendar" class="h-3.5 w-3.5" />{{ $letter->letter_date?->translatedFormat('d M Y') ?: '-' }}</span>
+                            <span class="tracking-letter-status">
+                                <span class="inline-flex w-fit items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset {{ $this->statusClass($letter->status) }}">
                                     <x-icon :name="$letter->status === 'Baru' ? 'mail' : ($letter->status === 'Disposisi Pimpinan' || $letter->status === 'Disposisi' ? 'send' : ($letter->status === 'Diproses' ? 'sync' : ($letter->status === 'Selesai' ? 'check' : 'clock')))" class="h-3.5 w-3.5" />
                                     {{ $letter->status }}
                                 </span>
-                            </div>
-                            <div class="flex flex-wrap gap-2 text-xs font-semibold text-slate-500">
-                                <span class="inline-flex items-center gap-1"><x-icon :name="$letter->type === 'Keluar' ? 'outbox' : 'inbox'" class="h-3.5 w-3.5" />{{ $letter->type }}</span>
-                                <span>{{ $letter->unit_code }}</span>
-                                <span class="inline-flex items-center gap-1"><x-icon name="user" class="h-3.5 w-3.5" />{{ $letter->external_party }}</span>
-                                <span class="inline-flex items-center gap-1"><x-icon name="calendar" class="h-3.5 w-3.5" />{{ $letter->letter_date?->translatedFormat('d M Y') }}</span>
-                            </div>
+                            </span>
+                            <span class="tracking-letter-action">
+                                <span wire:loading.remove wire:target="selectLetter({{ $letter->id }})" class="inline-flex items-center gap-1"><x-icon name="route" class="h-4 w-4" /><span>Lacak</span></span>
+                                <span wire:loading.inline-flex wire:target="selectLetter({{ $letter->id }})" class="button-progress"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span class="sr-only">Memuat detail</span></span>
+                            </span>
                         </button>
                     @empty
-                        <p class="px-5 py-12 text-center text-sm text-slate-500">Belum ada surat yang cocok dengan pencarian.</p>
+                        <div class="tracking-empty">
+                            <span class="tracking-empty-icon"><x-icon name="search" class="h-6 w-6" /></span>
+                            <h3 class="mt-4 text-sm font-bold text-slate-800">{{ $search !== '' || $typeFilter !== 'Semua' || $statusFilter !== 'Semua' ? 'Surat tidak ditemukan' : 'Belum ada surat' }}</h3>
+                            <p class="mt-2 max-w-sm text-xs leading-6 text-slate-500">{{ $search !== '' || $typeFilter !== 'Semua' || $statusFilter !== 'Semua' ? 'Coba kata kunci lain atau reset filter untuk melihat seluruh surat yang dapat Anda akses.' : 'Surat yang dapat Anda akses akan tampil di sini setelah dicatat dalam sistem.' }}</p>
+                            @if ($search !== '' || $typeFilter !== 'Semua' || $statusFilter !== 'Semua')
+                                <button type="button" wire:click="resetFilters" wire:loading.attr="disabled" class="tracking-reset mt-3">Reset pencarian</button>
+                            @endif
+                        </div>
                     @endforelse
                 </div>
 
@@ -379,27 +444,27 @@ new class extends Component
         </section>
 
         @if ($showDetailModal)
-            <div wire:click.self="$set('showDetailModal', false)" class="fixed inset-0 z-20 grid place-items-center bg-slate-950/50 p-4">
+            <div wire:click.self="$set('showDetailModal', false)" class="tracking-modal fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-3 sm:p-6" x-data x-trap.inert.noscroll="true" x-on:keydown.escape.window="$wire.set('showDetailModal', false)">
                 @if ($selectedLetter)
                     @php($activityHistory = $this->activityHistory($selectedLetter))
-                    <div class="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-lg bg-white shadow-xl">
-                        <div class="flex flex-col gap-3 border-b border-slate-200 p-6 sm:flex-row sm:items-start sm:justify-between">
-                            <div>
+                    <div role="dialog" aria-modal="true" aria-labelledby="tracking-detail-title" class="tracking-detail w-full max-w-5xl overflow-y-auto rounded-lg bg-white shadow-xl">
+                        <div class="tracking-detail-header flex flex-col gap-3 border-b border-slate-200 p-4 sm:flex-row sm:items-start sm:justify-between sm:p-6">
+                            <div class="min-w-0">
                                 <p class="text-xs font-bold uppercase text-teal-700">{{ $selectedLetter->type }} | {{ $selectedLetter->unit_code }}</p>
-                                <h2 class="mt-1 text-xl font-bold">{{ $selectedLetter->number }}</h2>
+                                <h2 id="tracking-detail-title" class="mt-1 text-xl font-bold">{{ $selectedLetter->number }}</h2>
                                 <p class="mt-1 text-sm text-slate-600">{{ $selectedLetter->subject }}</p>
                             </div>
-                            <div class="flex items-start gap-2">
+                            <div class="flex shrink-0 items-start gap-2">
                                 <span class="inline-flex w-fit items-center gap-1 rounded-full px-2.5 py-1 text-xs font-bold ring-1 {{ $this->statusClass($selectedLetter->status) }}">
                                     <x-icon :name="$selectedLetter->status === 'Baru' ? 'mail' : ($selectedLetter->status === 'Disposisi Pimpinan' || $selectedLetter->status === 'Disposisi' ? 'send' : ($selectedLetter->status === 'Diproses' ? 'sync' : ($selectedLetter->status === 'Selesai' ? 'check' : 'clock')))" class="h-3.5 w-3.5" />
                                     {{ $selectedLetter->status }}
                                 </span>
-                                <button type="button" wire:click="$set('showDetailModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
+                                <button type="button" aria-label="Tutup detail surat" wire:click="$set('showDetailModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">&times;</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             </div>
                         </div>
 
-                        <div class="space-y-5 p-6">
-                            <div class="grid gap-4 sm:grid-cols-2">
+                        <div class="space-y-5 p-4 sm:p-6">
+                            <div class="tracking-metadata grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                                 <div>
                                     <div class="text-xs font-bold uppercase text-slate-500">Nomor Agenda</div>
                                     <div class="font-semibold">{{ $selectedLetter->agenda_number ?: '-' }}</div>
@@ -428,9 +493,9 @@ new class extends Component
 
                             <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
                                 <h3 class="inline-flex items-center gap-2 font-bold"><x-icon name="route" class="h-4 w-4 text-teal-700" />Posisi Surat</h3>
-                                <div class="mt-4 grid gap-3 sm:grid-cols-5">
+                                <ol class="tracking-steps mt-4">
                                     @foreach ($steps as $step)
-                                        <div class="rounded-lg border {{ $step['done'] ? 'border-teal-200 bg-teal-50' : 'border-slate-200 bg-white' }} p-3">
+                                        <li @if ($step['active']) aria-current="step" @endif class="tracking-step rounded-lg border {{ $step['active'] ? 'tracking-step-active border-teal-300 bg-teal-50' : ($step['done'] ? 'border-teal-200 bg-teal-50' : 'border-slate-200 bg-white') }} p-3">
                                             <div class="inline-flex items-center gap-1 text-sm font-bold {{ $step['active'] ? 'text-teal-800' : ($step['done'] ? 'text-teal-700' : 'text-slate-500') }}">
                                                 <x-icon :name="$step['done'] ? 'check' : 'clock'" class="h-4 w-4" />
                                                 {{ $step['label'] }}
@@ -445,9 +510,9 @@ new class extends Component
                                                     @endif
                                                 </div>
                                             @endif
-                                        </div>
+                                        </li>
                                     @endforeach
-                                </div>
+                                </ol>
                             </div>
 
                             <div class="grid gap-4 sm:grid-cols-2">
@@ -565,17 +630,17 @@ new class extends Component
                                 </div>
                             </div>
                             <div class="flex justify-end">
-                                <button type="button" wire:click="$set('showDetailModal', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Tutup</button>
+                                <button type="button" wire:click="$set('showDetailModal', false)" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">Tutup</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             </div>
                         </div>
                     </div>
                 @else
-                    <div class="w-full max-w-lg rounded-lg bg-white p-6 text-center shadow-xl">
+                    <div role="dialog" aria-modal="true" aria-label="Surat tidak ditemukan" class="w-full max-w-lg rounded-lg bg-white p-6 text-center shadow-xl">
                         <p class="text-sm text-slate-500">Surat tidak ditemukan.</p>
-                        <button type="button" wire:click="$set('showDetailModal', false)" class="mt-4 min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Tutup</button>
+                        <button type="button" wire:click="$set('showDetailModal', false)" class="btn btn-outline-secondary mt-4 min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">Tutup</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
                 @endif
             </div>
         @endif
-    </main>
+    </section>
 </div>

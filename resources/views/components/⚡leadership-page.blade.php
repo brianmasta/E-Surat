@@ -7,14 +7,32 @@ use App\Models\DispositionRecipient;
 use App\Models\Letter;
 use App\Support\TaskInbox;
 use Illuminate\Validation\Rule;
+use App\Livewire\Concerns\WorkspacePanel;
 use Livewire\Component;
 use Livewire\WithFileUploads;
 use Livewire\WithPagination;
 
 new class extends Component
 {
+    use WorkspacePanel;
+
+    protected function workspacePage(): string
+    {
+        return 'disposisi';
+    }
+
     use WithFileUploads;
     use WithPagination;
+
+    #[\Livewire\Attributes\Locked]
+    public string $initialAction = '';
+
+    public function mount(): void
+    {
+        if ($this->initialAction === 'disposisi') {
+            $this->openStandaloneDispositionModal();
+        }
+    }
 
     public string $statusFilter = 'Semua';
 
@@ -97,6 +115,7 @@ new class extends Component
         $this->showDispositionModal = true;
     }
 
+    #[\Livewire\Attributes\On('workspace-create-disposition')]
     public function openStandaloneDispositionModal(): void
     {
         abort_unless($this->canDisposeLetters(), 403);
@@ -227,9 +246,7 @@ new class extends Component
 };
 ?>
 
-<div x-data="{ toast: '', showToast: false }"
-     x-on:notify.window="toast = $event.detail.message; showToast = true; setTimeout(() => showToast = false, 2600)"
-     class="min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
+<div class="{{ $embedded ? 'workspace-panel' : 'app-shell min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]' }}">
     @php
         $letters = $this->incomingLetters();
         $selectedLetter = $this->selectedLetter();
@@ -243,6 +260,7 @@ new class extends Component
         $latestDispositions = \App\Models\Disposition::query()->with('letter')->latest()->limit(5)->get();
     @endphp
 
+    @unless ($embedded)
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
             <x-app-logo class="h-11 w-11" />
@@ -253,22 +271,22 @@ new class extends Component
         </div>
 
         <nav class="mt-8 grid gap-2">
-            <a href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor Umum</a>
-            <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+            <a data-page-link href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor Umum</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'tugas']) }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                 <span class="inline-flex items-center gap-2"><x-icon name="task" class="h-4 w-4" />Tugas Saya</span>
                 @if ($taskCount > 0)
                     <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
                 @endif
             </a>
-            <a href="{{ route('leadership') }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="send" class="h-4 w-4" />Pimpinan</a>
-            <a href="{{ route('tracking') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'disposisi']) }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="send" class="h-4 w-4" />Pimpinan</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'pelacakan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
             @if ($currentUser?->isAdmin() || $currentUser?->isDepartmentHead())
-                <a href="{{ route('department-head') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="users" class="h-4 w-4" />Kepala Bagian</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'tindak-lanjut']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="users" class="h-4 w-4" />Kepala Bagian</a>
             @endif
             @if ($currentUser?->isAdmin())
-                <a href="{{ route('number-monitor') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
-                <a href="{{ route('sk-numbering') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
-                <a href="{{ route('settings') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'monitoring']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'sk']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'pengaturan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
             @endif
         </nav>
 
@@ -277,8 +295,10 @@ new class extends Component
             <div class="text-xs text-slate-400">{{ $currentUser->role }}</div>
         </div>
     </aside>
+    @endunless
 
-    <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
+    <section class="panel-main {{ $embedded ? 'workspace-panel-main' : 'min-w-0 px-4 py-6 sm:px-6 lg:px-8' }}">
+        @unless ($embedded)
         <header class="sticky top-0 z-10 -mx-4 flex flex-col gap-4 border-b border-slate-200 bg-slate-100/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 xl:flex-row xl:items-start xl:justify-between">
             <div>
                 <p class="text-xs font-bold uppercase text-teal-700">Pimpinan</p>
@@ -287,20 +307,17 @@ new class extends Component
             </div>
             <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                 @if ($this->canDisposeLetters())
-                    <button type="button" wire:click="openStandaloneDispositionModal" class="inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-teal-800">
-                        <x-icon name="send" class="mr-2 h-4 w-4" />
-                        Disposisi Mandiri
-                    </button>
+                    <button type="button" wire:click="openStandaloneDispositionModal" class="btn btn-primary inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-teal-800" wire:loading.attr="disabled" wire:target="openStandaloneDispositionModal"><span class="button-label" wire:loading.remove wire:target="openStandaloneDispositionModal"><x-icon name="send" class="mr-2 h-4 w-4" />
+                        Disposisi Mandiri</span><span class="button-progress" wire:loading.inline-flex wire:target="openStandaloneDispositionModal"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                 @endif
                 <form method="POST" action="{{ route('logout') }}">
                     @csrf
-                    <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
-                        <x-icon name="logout" class="mr-2 h-4 w-4" />
-                        Logout
-                    </button>
+                    <button type="submit" class="btn btn-outline-secondary inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500"><span class="button-label"><x-icon name="logout" class="mr-2 h-4 w-4" />
+                        Logout</span><span class="button-progress" style="display: none;"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                 </form>
             </div>
         </header>
+        @endunless
 
         <section class="mt-6 grid gap-3 md:grid-cols-3">
             <div class="rounded-lg border border-rose-200 bg-rose-50 p-5 shadow-sm">
@@ -328,15 +345,13 @@ new class extends Component
                         @foreach (['Semua', 'Baru', 'Disposisi Pimpinan', 'Diproses', 'Selesai'] as $status)
                             <button type="button"
                                     wire:click="setStatusFilter('{{ $status }}')"
-                                    class="rounded-md px-3 py-1.5 text-sm font-bold {{ $statusFilter === $status ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}">
-                                {{ $status }}
-                            </button>
+                                    class="btn rounded-md px-3 py-1.5 text-sm font-bold {{ $statusFilter === $status ? 'bg-white text-teal-700 shadow-sm' : 'text-slate-600' }}" wire:loading.attr="disabled" wire:target="setStatusFilter('{{ $status }}')"><span class="button-label" wire:loading.remove wire:target="setStatusFilter('{{ $status }}')">{{ $status }}</span><span class="button-progress" wire:loading.inline-flex wire:target="setStatusFilter('{{ $status }}')"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                         @endforeach
                     </div>
                 </div>
 
                 <div class="overflow-x-auto">
-                    <table class="w-full min-w-[760px] border-collapse text-left text-sm">
+                    <table class="table table-hover w-full min-w-[760px] border-collapse text-left text-sm">
                         <thead class="text-xs uppercase text-slate-500">
                             <tr>
                                 <th class="border-b border-slate-200 px-5 py-3">Nomor</th>
@@ -411,7 +426,7 @@ new class extends Component
                             <h2 class="mt-1 text-xl font-bold">Detail Surat Masuk</h2>
                             <p class="mt-1 text-sm text-slate-500">{{ $selectedLetter->number }}</p>
                         </div>
-                        <button type="button" wire:click="$set('showDetailModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
+                        <button type="button" wire:click="$set('showDetailModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">&times;</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <div class="space-y-5 p-6">
@@ -424,7 +439,7 @@ new class extends Component
                             <div class="text-sm font-bold text-slate-700">Aksi Pimpinan</div>
                             <div class="mt-3 flex flex-wrap gap-2">
                                 @if ($this->canDisposeLetters())
-                                    <button type="button" wire:click="openDispositionModal({{ $selectedLetter->id }})" class="min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Disposisi</button>
+                                    <button type="button" wire:click="openDispositionModal({{ $selectedLetter->id }})" class="btn btn-primary min-h-10 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="openDispositionModal({{ $selectedLetter->id }})"><span class="button-label" wire:loading.remove wire:target="openDispositionModal({{ $selectedLetter->id }})">Disposisi</span><span class="button-progress" wire:loading.inline-flex wire:target="openDispositionModal({{ $selectedLetter->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                                 @endif
                                 @if ($selectedLetter->file_path)
                                     <a href="{{ route('letters.document.review', $selectedLetter) }}" target="_blank" class="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold hover:border-teal-600">Review Dokumen</a>
@@ -504,7 +519,7 @@ new class extends Component
                                 <p class="mt-1 text-sm text-slate-500">Tidak terhubung ke surat masuk.</p>
                             @endunless
                         </div>
-                        <button type="button" wire:click="$set('showDispositionModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
+                        <button type="button" wire:click="$set('showDispositionModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showDispositionModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDispositionModal', false)">&times;</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDispositionModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <div class="mt-5 grid gap-4">
@@ -513,7 +528,7 @@ new class extends Component
                             <div class="grid max-h-56 gap-2 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2">
                                 @foreach ($recipients as $recipient)
                                     <label class="flex min-h-11 items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" wire:key="leadership-recipient-{{ $recipient->id }}">
-                                        <input wire:model="recipientIds" type="checkbox" value="{{ $recipient->id }}" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                                        <input wire:model="recipientIds" type="checkbox" value="{{ $recipient->id }}" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                                         <span>{{ $recipient->name }}{{ $recipient->unit ? ' - '.$recipient->unit : '' }}</span>
                                     </label>
                                 @endforeach
@@ -523,30 +538,25 @@ new class extends Component
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Instruksi Pimpinan
-                            <textarea wire:model="instruction" rows="4" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan arahan tindak lanjut..."></textarea>
+                            <textarea wire:model="instruction" rows="4" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Tuliskan arahan tindak lanjut..."></textarea>
                             @error('instruction') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             File Disposisi
-                            <input wire:model="dispositionScan" type="file" accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                            <input wire:model="dispositionScan" type="file" accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                             <span class="text-xs font-normal text-slate-500">Opsional. Unggah scan/file disposisi pimpinan dalam format PDF/JPG/PNG.</span>
                             @error('dispositionScan') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                     </div>
 
                     <div class="mt-6 flex justify-end gap-2">
-                        <button type="button" wire:click="$set('showDispositionModal', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
-                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">Kirim Disposisi</button>
+                        <button type="button" wire:click="$set('showDispositionModal', false)" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showDispositionModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDispositionModal', false)">Batal</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDispositionModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                        <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveDisposition"><span class="button-label" wire:loading.remove wire:target="saveDisposition">Kirim Disposisi</span><span class="button-progress" wire:loading.inline-flex wire:target="saveDisposition"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                     </div>
                 </form>
             </div>
         @endif
 
-    </main>
+    </section>
 
-    <div x-show="showToast"
-         x-transition
-         x-cloak
-         class="fixed bottom-6 right-6 z-30 max-w-sm rounded-lg bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg"
-         x-text="toast"></div>
 </div>

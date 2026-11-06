@@ -6,14 +6,25 @@ use App\Models\DecisionLetterNumber;
 use App\Support\TaskInbox;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use App\Livewire\Concerns\WorkspacePanel;
 use Livewire\Component;
 use Livewire\WithFileUploads;
 use Livewire\WithPagination;
 
 new class extends Component
 {
+    use WorkspacePanel;
+
+    protected function workspacePage(): string
+    {
+        return 'sk';
+    }
+
     use WithFileUploads;
     use WithPagination;
+
+    #[\Livewire\Attributes\Locked]
+    public string $initialAction = '';
 
     public string $unitCode = 'SET-MRP';
 
@@ -58,6 +69,9 @@ new class extends Component
         $this->year = (int) now()->format('Y');
         $this->includeYear = (bool) ($settings['include_year'] ?? true);
         $this->decisionDate = now()->toDateString();
+        if ($this->initialAction === 'sk') {
+            $this->openNumberModal();
+        }
     }
 
     public function updated(string $property): void
@@ -170,6 +184,7 @@ new class extends Component
         $this->openNumberModal($sequence);
     }
 
+    #[\Livewire\Attributes\On('workspace-create-sk')]
     public function openNumberModal(?int $sequence = null): void
     {
         abort_unless(auth()->user()?->isAdmin(), 403);
@@ -363,9 +378,7 @@ new class extends Component
 };
 ?>
 
-<div x-data="{ toast: '', showToast: false }"
-     x-on:notify.window="toast = $event.detail.message; showToast = true; setTimeout(() => showToast = false, 2600)"
-     class="min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
+<div class="{{ $embedded ? 'workspace-panel' : 'app-shell min-h-screen lg:grid lg:grid-cols-[280px_minmax(0,1fr)]' }}">
     @php
         $currentUser = auth()->user();
         $agencyProfile = AppSetting::agency();
@@ -376,6 +389,7 @@ new class extends Component
         $selectedRecord = $this->selectedRecord();
     @endphp
 
+    @unless ($embedded)
     <aside class="bg-slate-900 px-5 py-5 text-slate-100 lg:sticky lg:top-0 lg:z-10 lg:h-screen lg:overflow-y-auto">
         <div class="flex items-center gap-3">
             <x-app-logo class="h-11 w-11" />
@@ -386,23 +400,23 @@ new class extends Component
         </div>
 
         <nav class="mt-8 grid gap-2">
-            <a href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor</a>
-            <a href="{{ route('tracking') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
-            <a href="{{ route('my-tasks') }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
+            <a data-page-link href="{{ route('dashboard') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="dashboard" class="h-4 w-4" />Dasbor</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'pelacakan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="route" class="h-4 w-4" />Pelacakan Surat</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'tugas']) }}" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5">
                 <span class="inline-flex items-center gap-2"><x-icon name="task" class="h-4 w-4" />Tugas Saya</span>
                 @if ($taskCount > 0)
                     <span class="rounded-full bg-rose-500 px-2 py-0.5 text-xs font-bold text-white">{{ $taskCount }}</span>
                 @endif
             </a>
-            <a href="{{ route('number-monitor') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
-            <a href="{{ route('sk-numbering') }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'monitoring']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="list-numbered" class="h-4 w-4" />Monitoring Nomor</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'sk']) }}" class="inline-flex items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm font-semibold text-white"><x-icon name="gavel" class="h-4 w-4" />Penomoran SK</a>
             @if ($currentUser?->isAdmin() || $currentUser?->isLeader() || $currentUser?->isPersonalSecretary())
-                <a href="{{ route('leadership') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Halaman Pimpinan</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'disposisi']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="send" class="h-4 w-4" />Halaman Pimpinan</a>
             @endif
             @if ($currentUser?->isAdmin() || $currentUser?->isDepartmentHead())
-                <a href="{{ route('department-head') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="users" class="h-4 w-4" />Halaman Kepala Bagian</a>
+                <a data-page-link href="{{ route('dashboard', ['view' => 'tindak-lanjut']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="users" class="h-4 w-4" />Halaman Kepala Bagian</a>
             @endif
-            <a href="{{ route('settings') }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
+            <a data-page-link href="{{ route('dashboard', ['view' => 'pengaturan']) }}" class="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-slate-300 transition hover:bg-white/5"><x-icon name="settings" class="h-4 w-4" />Setting</a>
         </nav>
 
         <div class="mt-10 hidden border-t border-white/10 pt-5 lg:block">
@@ -410,8 +424,10 @@ new class extends Component
             <div class="text-xs text-slate-400">{{ $currentUser->role }}</div>
         </div>
     </aside>
+    @endunless
 
-    <main class="min-w-0 px-4 py-6 sm:px-6 lg:px-8">
+    <section class="panel-main {{ $embedded ? 'workspace-panel-main' : 'min-w-0 px-4 py-6 sm:px-6 lg:px-8' }}">
+        @unless ($embedded)
         <header class="sticky top-0 z-10 -mx-4 flex flex-col gap-4 border-b border-slate-200 bg-slate-100/95 px-4 py-4 backdrop-blur sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8 xl:flex-row xl:items-start xl:justify-between">
             <div>
                 <p class="text-xs font-bold uppercase text-teal-700">Penomoran</p>
@@ -419,19 +435,16 @@ new class extends Component
                 <p class="mt-2 max-w-2xl text-sm text-slate-600">Catat nomor SK, lihat nomor berikutnya, dan pantau nomor urut yang kosong pada unit dan tahun terpilih.</p>
             </div>
             <div class="flex flex-col gap-2 sm:flex-row">
-                <button type="button" wire:click="openNumberModal" class="inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-teal-800">
-                    <x-icon name="plus" class="mr-2 h-4 w-4" />
-                    Tambah Nomor SK
-                </button>
+                <button type="button" wire:click="openNumberModal" class="btn btn-primary inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white shadow-sm hover:bg-teal-800" wire:loading.attr="disabled" wire:target="openNumberModal"><span class="button-label" wire:loading.remove wire:target="openNumberModal"><x-icon name="plus" class="mr-2 h-4 w-4" />
+                    Tambah Nomor SK</span><span class="button-progress" wire:loading.inline-flex wire:target="openNumberModal"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                 <form method="POST" action="{{ route('logout') }}">
                     @csrf
-                    <button type="submit" class="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500">
-                        <x-icon name="logout" class="mr-2 h-4 w-4" />
-                        Logout
-                    </button>
+                    <button type="submit" class="btn btn-outline-secondary inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-sm font-bold text-slate-800 shadow-sm hover:border-rose-500"><span class="button-label"><x-icon name="logout" class="mr-2 h-4 w-4" />
+                        Logout</span><span class="button-progress" style="display: none;"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                 </form>
             </div>
         </header>
+        @endunless
 
         <section class="mt-6 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
             <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -439,16 +452,14 @@ new class extends Component
                     <h2 class="text-lg font-bold">Nomor Kosong</h2>
                     <p class="mt-1 text-sm text-slate-500">Nomor urut kosong pada {{ $unitCode }} tahun {{ $year }}.</p>
                 </div>
-                <button type="button" wire:click="openNumberModal" class="inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                    <x-icon name="plus" class="mr-2 h-4 w-4" />
-                    Tambah Nomor SK
-                </button>
+                @unless ($embedded)
+                <button type="button" wire:click="openNumberModal" class="btn btn-primary inline-flex min-h-11 items-center justify-center rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="openNumberModal"><span class="button-label" wire:loading.remove wire:target="openNumberModal"><x-icon name="plus" class="mr-2 h-4 w-4" />
+                    Tambah Nomor SK</span><span class="button-progress" wire:loading.inline-flex wire:target="openNumberModal"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                @endunless
             </div>
                 <div class="mt-4 grid gap-2">
                     @forelse ($missingItems as $item)
-                        <button type="button" wire:click="useSequence({{ $item['sequence'] }})" class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-left text-sm font-bold text-amber-900 hover:border-amber-500">
-                            <span class="inline-flex items-center gap-2"><x-icon name="tag" class="h-4 w-4" />{{ $item['number'] }}</span>
-                        </button>
+                        <button type="button" wire:click="useSequence({{ $item['sequence'] }})" class="btn rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-left text-sm font-bold text-amber-900 hover:border-amber-500" wire:loading.attr="disabled" wire:target="useSequence({{ $item['sequence'] }})"><span class="button-label" wire:loading.remove wire:target="useSequence({{ $item['sequence'] }})"><span class="inline-flex items-center gap-2"><x-icon name="tag" class="h-4 w-4" />{{ $item['number'] }}</span></span><span class="button-progress" wire:loading.inline-flex wire:target="useSequence({{ $item['sequence'] }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     @empty
                         <p class="text-sm text-slate-500">Belum ada nomor kosong.</p>
                     @endforelse
@@ -459,11 +470,11 @@ new class extends Component
             <div class="grid gap-3 border-b border-slate-200 p-5 md:grid-cols-[minmax(0,1fr)_220px]">
                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                     Cari Nomor SK
-                    <input wire:model.live.debounce.300ms="search" type="search" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Nomor, judul, atau catatan...">
+                    <input wire:model.live.debounce.300ms="search" type="search" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Nomor, judul, atau catatan...">
                 </label>
                 <label class="grid gap-1 text-sm font-bold text-slate-600">
                     Status
-                    <select wire:model.live="statusFilter" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                    <select wire:model.live="statusFilter" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                         <option>Semua</option>
                         @foreach ($this->statuses() as $statusOption)
                             <option value="{{ $statusOption }}">{{ $statusOption }}</option>
@@ -473,7 +484,7 @@ new class extends Component
             </div>
 
             <div class="overflow-x-auto">
-                <table class="w-full min-w-[1040px] border-collapse text-left text-sm">
+                <table class="table table-hover w-full min-w-[1040px] border-collapse text-left text-sm">
                     <thead class="text-xs uppercase text-slate-500">
                         <tr>
                             <th class="border-b border-slate-200 px-5 py-3">Nomor SK</th>
@@ -508,7 +519,7 @@ new class extends Component
                                             <x-icon :name="$record->status === 'Dipesan' ? 'bookmark' : ($record->status === 'Dipakai' ? 'check' : 'cancel')" class="h-3.5 w-3.5" />
                                             {{ $record->status }}
                                         </span>
-                                        <select wire:change="updateStatus({{ $record->id }}, $event.target.value)" class="min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold">
+                                        <select wire:change="updateStatus({{ $record->id }}, $event.target.value)" class="form-select min-h-9 rounded-lg border border-slate-200 bg-white px-2 text-xs font-semibold">
                                             @foreach ($this->statuses() as $statusOption)
                                                 <option value="{{ $statusOption }}" @selected($record->status === $statusOption)>{{ $statusOption }}</option>
                                             @endforeach
@@ -517,9 +528,9 @@ new class extends Component
                                 </td>
                                 <td class="border-b border-slate-100 px-5 py-4">
                                     <div class="flex flex-wrap justify-end gap-2">
-                                        <button type="button" wire:click="openDetailModal({{ $record->id }})" class="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold hover:border-teal-600"><x-icon name="eye" class="h-3.5 w-3.5" />Detail</button>
-                                        <button type="button" wire:click="openEditModal({{ $record->id }})" class="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold hover:border-teal-600"><x-icon name="edit" class="h-3.5 w-3.5" />Edit</button>
-                                        <button type="button" wire:click="deleteNumber({{ $record->id }})" wire:confirm="Hapus nomor SK ini?" class="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-bold text-rose-700 hover:border-rose-500"><x-icon name="trash" class="h-3.5 w-3.5" />Hapus</button>
+                                        <button type="button" wire:click="openDetailModal({{ $record->id }})" class="btn btn-outline-secondary inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="openDetailModal({{ $record->id }})"><span class="button-label" wire:loading.remove wire:target="openDetailModal({{ $record->id }})"><x-icon name="eye" class="h-3.5 w-3.5" />Detail</span><span class="button-progress" wire:loading.inline-flex wire:target="openDetailModal({{ $record->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                        <button type="button" wire:click="openEditModal({{ $record->id }})" class="btn btn-outline-secondary inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold hover:border-teal-600" wire:loading.attr="disabled" wire:target="openEditModal({{ $record->id }})"><span class="button-label" wire:loading.remove wire:target="openEditModal({{ $record->id }})"><x-icon name="edit" class="h-3.5 w-3.5" />Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="openEditModal({{ $record->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                        <button type="button" wire:click="deleteNumber({{ $record->id }})" wire:confirm="Hapus nomor SK ini?" class="btn btn-outline-danger inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-bold text-rose-700 hover:border-rose-500" wire:loading.attr="disabled" wire:target="deleteNumber({{ $record->id }})"><span class="button-label" wire:loading.remove wire:target="deleteNumber({{ $record->id }})"><x-icon name="trash" class="h-3.5 w-3.5" />Hapus</span><span class="button-progress" wire:loading.inline-flex wire:target="deleteNumber({{ $record->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menghapus…</span></span></button>
                                     </div>
                                 </td>
                             </tr>
@@ -545,7 +556,7 @@ new class extends Component
                             <p class="text-xs font-bold uppercase text-teal-700">Penomoran SK</p>
                             <h2 class="mt-1 inline-flex items-center gap-2 text-xl font-bold"><x-icon :name="$editingRecordId ? 'edit' : 'plus'" class="h-5 w-5 text-teal-700" />{{ $editingRecordId ? 'Edit Nomor SK' : 'Tambah Nomor SK' }}</h2>
                         </div>
-                        <button type="button" wire:click="$set('showNumberModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
+                        <button type="button" wire:click="$set('showNumberModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showNumberModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showNumberModal', false)">&times;</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showNumberModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
 
                     <div class="mt-5 grid gap-4 md:grid-cols-[180px_minmax(0,1fr)_150px]">
@@ -559,7 +570,7 @@ new class extends Component
                         </label>
                         <label class="grid min-w-0 gap-1 text-sm font-bold text-slate-600">
                             Unit SK
-                            <select wire:model.live="unitCode" class="min-h-11 w-full rounded-lg border border-slate-200 px-3 text-slate-950">
+                            <select wire:model.live="unitCode" class="form-select min-h-11 w-full rounded-lg border border-slate-200 px-3 text-slate-950">
                                 @foreach ($units as $unit)
                                     <option value="{{ $unit['code'] }}">{{ $unit['code'] }} - {{ $unit['name'] }}</option>
                                 @endforeach
@@ -567,7 +578,7 @@ new class extends Component
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Tahun Pencatatan
-                            <input wire:model.live="year" type="number" min="2000" max="2100" disabled class="min-h-11 rounded-lg border border-slate-200 bg-slate-100 px-3 text-slate-500">
+                            <input wire:model.live="year" type="number" min="2000" max="2100" disabled class="form-control min-h-11 rounded-lg border border-slate-200 bg-slate-100 px-3 text-slate-500">
                         </label>
                     </div>
 
@@ -575,7 +586,7 @@ new class extends Component
                         <div class="grid gap-1 text-sm font-bold text-slate-600">
                             Format Nomor
                             <label class="flex min-h-11 items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700">
-                                <input wire:model.live="includeYear" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
+                                <input wire:model.live="includeYear" type="checkbox" class="form-check-input h-4 w-4 rounded border-slate-300 text-teal-700">
                                 Tampilkan Tahun
                             </label>
                         </div>
@@ -589,12 +600,12 @@ new class extends Component
                         <div class="grid gap-4 md:grid-cols-[minmax(0,1fr)_200px]">
                             <label class="grid min-w-0 gap-1 text-sm font-bold text-slate-600">
                                 Judul / Tentang SK
-                                <input wire:model="title" type="text" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Penetapan panitia kegiatan">
+                                <input wire:model="title" type="text" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Contoh: Penetapan panitia kegiatan">
                                 @error('title') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Tanggal SK
-                                <input wire:model="decisionDate" type="date" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <input wire:model="decisionDate" type="date" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                 @error('decisionDate') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                         </div>
@@ -602,13 +613,13 @@ new class extends Component
                         <div class="grid gap-4 md:grid-cols-[200px_minmax(0,1fr)]">
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Nomor Urut Khusus
-                                <input wire:model.live="sequenceOverride" type="number" min="1" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="{{ $this->nextSequence() }}">
+                                <input wire:model.live="sequenceOverride" type="number" min="1" class="form-control min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="{{ $this->nextSequence() }}">
                                 <span class="text-xs font-normal text-slate-500">Kosongkan untuk memakai nomor berikutnya.</span>
                                 @error('sequenceOverride') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                             </label>
                             <label class="grid gap-1 text-sm font-bold text-slate-600">
                                 Status
-                                <select wire:model="status" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
+                                <select wire:model="status" class="form-select min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950">
                                     @foreach ($this->statuses() as $statusOption)
                                         <option value="{{ $statusOption }}">{{ $statusOption }}</option>
                                     @endforeach
@@ -619,21 +630,21 @@ new class extends Component
 
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             Catatan
-                            <textarea wire:model="notes" rows="2" class="rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Catatan internal jika diperlukan..."></textarea>
+                            <textarea wire:model="notes" rows="2" class="form-control rounded-lg border border-slate-200 px-3 py-2 text-slate-950" placeholder="Catatan internal jika diperlukan..."></textarea>
                             @error('notes') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                         <label class="grid gap-1 text-sm font-bold text-slate-600">
                             File SK
-                            <input wire:model="decisionFile" type="file" accept=".pdf,.jpg,.jpeg,.png" class="rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
+                            <input wire:model="decisionFile" type="file" accept=".pdf,.jpg,.jpeg,.png" class="form-control rounded-lg border border-slate-200 bg-white p-2 text-slate-950">
                             <span class="text-xs font-normal text-slate-500">Opsional. Unggah file SK dalam format PDF/JPG/PNG. Saat edit, kosongkan jika file lama tetap dipakai.</span>
                             @error('decisionFile') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
                         </label>
                     </div>
 
                     <div class="mt-6 flex justify-end gap-2 border-t border-slate-100 pt-4">
-                        <button type="button" wire:click="resetForm" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Reset</button>
-                        <button type="button" wire:click="$set('showNumberModal', false)" class="min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Batal</button>
-                        <button type="submit" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">{{ $editingRecordId ? 'Simpan Perubahan' : 'Simpan Nomor SK' }}</button>
+                        <button type="button" wire:click="resetForm" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="resetForm"><span class="button-label" wire:loading.remove wire:target="resetForm">Reset</span><span class="button-progress" wire:loading.inline-flex wire:target="resetForm"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                        <button type="button" wire:click="$set('showNumberModal', false)" class="btn btn-outline-secondary min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showNumberModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showNumberModal', false)">Batal</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showNumberModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                        <button type="submit" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800" wire:loading.attr="disabled" wire:target="saveNumber"><span class="button-label" wire:loading.remove wire:target="saveNumber">{{ $editingRecordId ? 'Simpan Perubahan' : 'Simpan Nomor SK' }}</span><span class="button-progress" wire:loading.inline-flex wire:target="saveNumber"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menyimpan…</span></span></button>
                     </div>
                 </form>
             </div>
@@ -649,7 +660,7 @@ new class extends Component
                                 <h2 class="mt-1 text-xl font-bold">{{ $selectedRecord->number }}</h2>
                                 <p class="mt-1 text-sm text-slate-500">Urut {{ str_pad((string) $selectedRecord->sequence, 3, '0', STR_PAD_LEFT) }}</p>
                             </div>
-                            <button type="button" wire:click="$set('showDetailModal', false)" class="grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold">&times;</button>
+                            <button type="button" wire:click="$set('showDetailModal', false)" class="btn grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-xl font-bold" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">&times;</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                         </div>
 
                         <div class="space-y-5 p-6">
@@ -712,25 +723,20 @@ new class extends Component
                             </div>
 
                             <div class="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-4">
-                                <button type="button" wire:click="openEditModal({{ $selectedRecord->id }})" class="inline-flex min-h-11 items-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-bold"><x-icon name="edit" class="h-4 w-4" />Edit</button>
-                                <button type="button" wire:click="deleteNumber({{ $selectedRecord->id }})" wire:confirm="Hapus nomor SK ini?" class="inline-flex min-h-11 items-center gap-2 rounded-lg border border-rose-200 px-4 text-sm font-bold text-rose-700"><x-icon name="trash" class="h-4 w-4" />Hapus</button>
-                                <button type="button" wire:click="$set('showDetailModal', false)" class="min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white">Tutup</button>
+                                <button type="button" wire:click="openEditModal({{ $selectedRecord->id }})" class="btn btn-outline-secondary inline-flex min-h-11 items-center gap-2 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="openEditModal({{ $selectedRecord->id }})"><span class="button-label" wire:loading.remove wire:target="openEditModal({{ $selectedRecord->id }})"><x-icon name="edit" class="h-4 w-4" />Edit</span><span class="button-progress" wire:loading.inline-flex wire:target="openEditModal({{ $selectedRecord->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
+                                <button type="button" wire:click="deleteNumber({{ $selectedRecord->id }})" wire:confirm="Hapus nomor SK ini?" class="btn btn-outline-danger inline-flex min-h-11 items-center gap-2 rounded-lg border border-rose-200 px-4 text-sm font-bold text-rose-700" wire:loading.attr="disabled" wire:target="deleteNumber({{ $selectedRecord->id }})"><span class="button-label" wire:loading.remove wire:target="deleteNumber({{ $selectedRecord->id }})"><x-icon name="trash" class="h-4 w-4" />Hapus</span><span class="button-progress" wire:loading.inline-flex wire:target="deleteNumber({{ $selectedRecord->id }})"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Menghapus…</span></span></button>
+                                <button type="button" wire:click="$set('showDetailModal', false)" class="btn btn-primary min-h-11 rounded-lg bg-teal-700 px-4 text-sm font-bold text-white" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">Tutup</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                             </div>
                         </div>
                     </div>
                 @else
                     <div class="w-full max-w-lg rounded-lg bg-white p-6 text-center shadow-xl">
                         <p class="text-sm text-slate-500">Data SK tidak ditemukan.</p>
-                        <button type="button" wire:click="$set('showDetailModal', false)" class="mt-4 min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold">Tutup</button>
+                        <button type="button" wire:click="$set('showDetailModal', false)" class="btn btn-outline-secondary mt-4 min-h-11 rounded-lg border border-slate-200 px-4 text-sm font-bold" wire:loading.attr="disabled" wire:target="$set('showDetailModal', false)"><span class="button-label" wire:loading.remove wire:target="$set('showDetailModal', false)">Tutup</span><span class="button-progress" wire:loading.inline-flex wire:target="$set('showDetailModal', false)"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>Memproses…</span></span></button>
                     </div>
                 @endif
             </div>
         @endif
-    </main>
+    </section>
 
-    <div x-show="showToast"
-         x-transition
-         x-cloak
-         class="fixed bottom-6 right-6 z-30 max-w-sm rounded-lg bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-lg"
-         x-text="toast"></div>
 </div>

@@ -44,94 +44,65 @@ new class extends Component
 @php($agencyProfile = AppSetting::agency())
 @php($androidApp = AppSetting::getValue('mobile_versions', \App\Http\Controllers\Api\Mobile\AppVersionController::defaults())['android'] ?? \App\Http\Controllers\Api\Mobile\AppVersionController::defaults()['android'])
 
-<main class="grid min-h-screen place-items-center px-4 py-8">
-    <section class="w-full max-w-5xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm lg:grid lg:grid-cols-[1fr_420px]">
-        <div class="bg-slate-900 p-8 text-white lg:p-10">
-            <x-app-logo class="h-14 w-14" />
-            <h1 class="mt-8 text-3xl font-bold tracking-normal">{{ $agencyProfile['app_name'] }}</h1>
-            <p class="mt-3 max-w-xl text-sm leading-6 text-slate-300">
-                Sistem persuratan untuk {{ $agencyProfile['name'] }}, dengan akses berbeda untuk Admin, Pimpinan, Sekretaris Pribadi, Kepala Bagian, dan Staf.
-            </p>
-
-            <div class="mt-8 grid gap-3 text-sm">
-                <div class="rounded-lg bg-white/10 p-4">
-                    <div class="font-bold">Admin Sekretariat</div>
-                    <div class="text-slate-300">Catat surat, kelola setting, disposisi, dan status.</div>
-                </div>
-                <div class="rounded-lg bg-white/10 p-4">
-                    <div class="font-bold">Pimpinan</div>
-                    <div class="text-slate-300">Melihat surat dan memberi disposisi elektronik.</div>
-                </div>
-                <div class="rounded-lg bg-white/10 p-4">
-                    <div class="font-bold">Sekretaris Pribadi</div>
-                    <div class="text-slate-300">Menginput scan disposisi pimpinan untuk diteruskan.</div>
-                </div>
-                <div class="rounded-lg bg-white/10 p-4">
-                    <div class="font-bold">Kepala Bagian</div>
-                    <div class="text-slate-300">Menerima disposisi dan memperbarui tindak lanjut.</div>
-                </div>
-                <div class="rounded-lg bg-white/10 p-4">
-                    <div class="font-bold">Staf Sekretariat</div>
-                    <div class="text-slate-300">Memproses surat dan memperbarui status pekerjaan.</div>
+<main class="login-page">
+    <section class="login-card" aria-label="Masuk ke aplikasi persuratan">
+        <div class="login-brand">
+            <div class="login-brand-top">
+                <x-app-logo class="h-12 w-12" />
+                <div>
+                    <div class="login-brand-name">{{ $agencyProfile['app_name'] }}</div>
+                    <div class="login-brand-caption">Sistem Persuratan Digital</div>
                 </div>
             </div>
+            <div class="login-eyebrow">Ruang kerja persuratan</div>
+            <h1>Surat tertata.<br><span>Kerja lebih mudah.</span></h1>
+            <p class="login-brand-description">Kelola surat, teruskan disposisi, dan pantau tindak lanjut dalam satu ruang kerja untuk {{ $agencyProfile['name'] }}.</p>
+            <div class="login-features">
+                <div class="login-feature">
+                    <span class="login-feature-icon"><x-icon name="inbox" class="h-5 w-5" /></span>
+                    <div><strong>Arsip yang terorganisir</strong><p>Surat masuk dan keluar mudah ditemukan kembali.</p></div>
+                </div>
+                <div class="login-feature">
+                    <span class="login-feature-icon"><x-icon name="send" class="h-5 w-5" /></span>
+                    <div><strong>Disposisi lebih praktis</strong><p>Teruskan instruksi kepada pihak yang tepat.</p></div>
+                </div>
+                <div class="login-feature">
+                    <span class="login-feature-icon"><x-icon name="route" class="h-5 w-5" /></span>
+                    <div><strong>Pantau setiap proses</strong><p>Ikuti perjalanan surat dan penyelesaian tugas.</p></div>
+                </div>
+            </div>
+            <div class="login-brand-footer">{{ $agencyProfile['name'] }}<br>Akses sesuai peran dan tanggung jawab Anda.</div>
         </div>
-
-        <form wire:submit="login" class="p-6 sm:p-8">
-            <p class="text-xs font-bold uppercase text-teal-700">Autentikasi</p>
-            <h2 class="mt-1 text-2xl font-bold">Masuk Aplikasi</h2>
-            <p class="mt-2 text-sm text-slate-500">Gunakan akun aktif.</p>
-
-            <div class="mt-6 grid gap-4">
-                <label class="grid gap-1 text-sm font-bold text-slate-600">
-                    Email
-                    <input wire:model="email" type="email" autocomplete="email" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Email">
-                    @error('email') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
-                </label>
-                <label class="grid gap-1 text-sm font-bold text-slate-600">
-                    Password
-                    <input wire:model="password" type="password" autocomplete="current-password" class="min-h-11 rounded-lg border border-slate-200 px-3 text-slate-950" placeholder="Password">
-                    @error('password') <span class="text-xs text-rose-600">{{ $message }}</span> @enderror
-                </label>
-                <label class="flex items-center gap-3 text-sm font-bold text-slate-600">
-                    <input wire:model="remember" type="checkbox" class="h-4 w-4 rounded border-slate-300 text-teal-700">
-                    Ingat sesi login
-                </label>
-            </div>
-
-            <button type="submit" class="mt-6 min-h-11 w-full rounded-lg bg-teal-700 px-4 text-sm font-bold text-white hover:bg-teal-800">
-                Masuk
-            </button>
-
-            <a href="{{ $androidApp['download_url'] ?? asset('downloads/esurat-android.apk') }}"
-               class="mt-3 inline-flex min-h-11 w-full items-center justify-center rounded-lg border border-teal-200 bg-teal-50 px-4 text-sm font-bold text-teal-800 hover:border-teal-700"
-               download>
-                Unduh Aplikasi Android
-            </a>
-
-            <div class="mt-2 text-center text-xs text-slate-500">
-                Versi Android {{ $androidApp['current_version_name'] ?? '1.0.0' }}
-            </div>
-
-            <div class="mt-5 text-center text-xs text-slate-500">
-                Powered by
-                <span class="font-semibold text-teal-700">
-                    Combrof Digital Solution
-                </span>
-                © {{ date('Y') }}
-            </div>
-
-            {{-- <div class="mt-6 rounded-lg bg-slate-50 p-4 text-sm text-slate-600">
-                <div class="font-bold text-slate-800">Akun demo</div>
-                <div class="mt-2 grid gap-1">
-                    <div>Admin: admin@mrp-papuatengah.test</div>
-                    <div>Pimpinan: pimpinan@mrp-papuatengah.test</div>
-                    <div>Sekretaris Pribadi: sekpri@mrp-papuatengah.test</div>
-                    <div>Kepala Bagian: kepala.bagian@mrp-papuatengah.test</div>
-                    <div>Staf: staf@mrp-papuatengah.test</div>
-                    <div>Password semua akun: password</div>
+        <form wire:submit="login" class="login-form">
+            <p class="login-form-eyebrow">Selamat datang kembali</p>
+            <h2>Masuk ke ruang kerja</h2>
+            <p class="login-form-description">Gunakan akun aktif Anda untuk melanjutkan<br class="hidden sm:block"> pengelolaan persuratan.</p>
+            <div class="login-fields">
+                <div>
+                    <label for="login-email" class="form-label">Alamat email</label>
+                    <input id="login-email" wire:model="email" type="email" autocomplete="username" required class="form-control @error('email') is-invalid @enderror" placeholder="nama@instansi.go.id" @error('email') aria-invalid="true" aria-describedby="login-email-error" @enderror>
+                    @error('email') <div id="login-email-error" class="invalid-feedback">{{ $message }}</div> @enderror
                 </div>
-            </div> --}}
+                <div>
+                    <label for="login-password" class="form-label">Password</label>
+                    <input id="login-password" wire:model="password" type="password" autocomplete="current-password" required class="form-control @error('password') is-invalid @enderror" placeholder="Masukkan password Anda" @error('password') aria-invalid="true" aria-describedby="login-password-error" @enderror>
+                    @error('password') <div id="login-password-error" class="invalid-feedback">{{ $message }}</div> @enderror
+                </div>
+                <label class="inline-flex items-center gap-2.5 text-xs text-slate-500">
+                    <input wire:model="remember" type="checkbox" class="form-check-input h-4 w-4">
+                    Ingat sesi login saya
+                </label>
+            </div>
+            <button type="submit" class="btn btn-primary login-submit" wire:loading.attr="disabled" wire:target="login">
+                <span class="button-label" wire:loading.remove wire:target="login">Masuk Aplikasi <x-icon name="send" class="h-4 w-4" /></span>
+                <span class="button-progress" wire:loading.inline-flex wire:target="login"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span>Memverifikasi…</span>
+            </button>
+            <div class="login-divider">AKSES DARI PERANGKAT ANDA</div>
+            <a href="{{ $androidApp['download_url'] ?? asset('downloads/esurat-android.apk') }}" class="btn btn-outline-secondary login-download" download>
+                <x-icon name="download" class="h-4 w-4" /> Unduh Aplikasi Android
+            </a>
+            <div class="login-version">Versi Android {{ $androidApp['current_version_name'] ?? '1.0.0' }}</div>
+            <div class="login-footer">Powered by <span class="font-semibold text-teal-700">Combrof Digital Solution</span><br>© {{ date('Y') }} · {{ $agencyProfile['app_name'] }}</div>
         </form>
     </section>
 </main>
